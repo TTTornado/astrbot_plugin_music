@@ -242,7 +242,7 @@ class KuGouMusic(BaseMusicPlayer):
                     "Referer": "https://m.kugou.com/",
                 },
                 proxy=self.platform_cfg.proxy or None,
-                timeout=20, # type: ignore
+                timeout=20,  # type: ignore
             ) as response:
                 if response.status != 200:
                     raise RuntimeError(
@@ -478,6 +478,13 @@ class KuGouMusic(BaseMusicPlayer):
                 None,
             )
             if song.audio_url:
+                quality = item.get("quality") or item.get("audio_quality")
+                if isinstance(quality, (str, int, float)) and not isinstance(
+                    quality, bool
+                ):
+                    song.quality = (
+                        quality if isinstance(quality, str) else f"{quality:g}kbps"
+                    )
                 return True
 
         return False
@@ -546,6 +553,8 @@ class KuGouMusic(BaseMusicPlayer):
                 (url for url in candidates if isinstance(url, str) and url.strip()),
                 None,
             )
+            if song.audio_url:
+                song.quality = "128kbps"
         else:
             data = None
         if not song.audio_url:

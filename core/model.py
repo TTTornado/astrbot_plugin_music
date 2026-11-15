@@ -30,6 +30,9 @@ class Song:
     audio_url: str | None = None
     """音频播放 URL"""
 
+    quality: str | None = None
+    """Resolved audio quality identifier or description."""
+
     path: str | None = None
     """音频文件路径(预留给持久化)"""
 
@@ -60,6 +63,8 @@ class Song:
             lines.append(f"时长: {mins}:{secs:02d}")
         if self.audio_url:
             lines.append(f"播放链接: {self.audio_url}")
+        if self.quality:
+            lines.append(f"音质: {self.quality}")
         if self.cover_url:
             lines.append(f"封面: {self.cover_url}")
         if self.page_url:

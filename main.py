@@ -307,7 +307,7 @@ class MusicPlugin(Star):
 
         Args:
             song_name(string): 歌曲名称或包含歌手的关键词
-            platform(string): 音源标识或显示名称，例如 netease、netease_api、kuwo、qqmusic、kugou、kugou_api、soda、txqq、neko、apple。指定后仅使用该音源；留空时按音源优先级回退。
+            platform(string): 音源标识或显示名称，例如 netease、netease_api、kuwo、qqmusic、kugou、kugou_api、soda、txqq、hgovo、neko、xunhuisi、apple。指定后仅使用该音源；留空时按音源优先级回退。
             artist(string): 可选的指定歌手。填写后只接受歌手匹配的结果。
             send_mode(string): 可选的本次发送方式，支持 native_card、ark_card、record_link、record_local、file_link、file_local、text, 默认留空使用用户自定义顺序。
         """

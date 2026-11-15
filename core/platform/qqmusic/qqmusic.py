@@ -534,8 +534,10 @@ class QQMusic(BaseMusicPlayer):
             preview_url = self._media_url(str(servers[0]), str(url_info[0]["purl"]))
             if await self._probe_audio_url(preview_url):
                 song.audio_url = preview_url
+                song.quality = "preview"
                 return song
         song.audio_url = None
+        song.quality = None
         logger.warning(
             f"QQ Music did not return a playable preview URL for song {song.note}"
         )
@@ -694,6 +696,7 @@ class QQMusic(BaseMusicPlayer):
                         media_url = self._media_url(server, purl)
                         if await self._probe_audio_url(media_url):
                             song.audio_url = media_url
+                            song.quality = candidate_quality
                             return song
 
             prefix, extension = self.URL_VKEY_FILES[candidate_quality]
@@ -730,6 +733,7 @@ class QQMusic(BaseMusicPlayer):
                     media_url = self._media_url(server, str(first["purl"]))
                     if await self._probe_audio_url(media_url):
                         song.audio_url = media_url
+                        song.quality = candidate_quality
                         return song
 
         logger.info(

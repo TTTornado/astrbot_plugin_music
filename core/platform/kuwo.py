@@ -296,6 +296,7 @@ class KuwoMusic(BaseMusicPlayer):
             audio_url = track_data.get("url")
             if isinstance(audio_url, str) and audio_url:
                 song.audio_url = audio_url.split("?", 1)[0]
+                song.quality = "standard"
             if not song.duration:
                 duration_value = track_data.get("duration")
                 if isinstance(duration_value, (int, float, str)) and not isinstance(
@@ -424,6 +425,7 @@ class KuwoMusic(BaseMusicPlayer):
                                         and decrypted_path.stat().st_size > 0
                                     ):
                                         file_path.unlink(missing_ok=True)
+                                        song.quality = quality
                                         return decrypted_path
                                 except Exception as exc:
                                     logger.warning(
@@ -433,6 +435,7 @@ class KuwoMusic(BaseMusicPlayer):
                                     decrypted_path.unlink(missing_ok=True)
                                 file_path.unlink(missing_ok=True)
                             else:
+                                song.quality = quality
                                 return file_path
                 logger.warning(
                     f"Kuwo {quality} quality unavailable for {song.id}, "
@@ -440,7 +443,10 @@ class KuwoMusic(BaseMusicPlayer):
                 )
 
         if song.audio_url:
-            return await super().download_audio(song, quality="standard")
+            file_path = await super().download_audio(song, quality="standard")
+            if file_path:
+                song.quality = "standard"
+            return file_path
         return None
 
     async def fetch_lyrics(self, song: Song) -> Song:

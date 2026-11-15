@@ -596,8 +596,75 @@
                     }
                 }
             },
+            "hgovo": {
+                "name": "盒盖API",
+                "items": {
+                    "priority": {
+                        "description": "优先级",
+                        "hint": "数值越小越优先；未指定平台的“点歌”会按优先级依次回退。重复优先级会自动调整，音源配置按优先级排序。",
+                        "type": "int",
+                        "slider": {
+                            "min": 1,
+                            "max": 100,
+                            "step": 1
+                        },
+                        "default": 65
+                    },
+                    "enable": {
+                        "description": "启用此音源",
+                        "hint": "关闭后此音源不会参与命令匹配或搜索。",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "trigger_words": {
+                        "description": "触发词",
+                        "hint": "每项需填写“触发词:子音源标识”；盒盖 API 每次搜索最多返回一首歌。",
+                        "type": "list",
+                        "default": [
+                            "盒盖点歌:qq",
+                            "盒盖汽水点歌:qs",
+                            "盒盖酷我点歌:kw",
+                            "盒盖QQ分支点歌:zxl",
+                            "盒盖QQ友链点歌:bd",
+                            "盒盖网易VIP点歌:wy_vip",
+                            "盒盖QQ点歌:qq",
+                            "盒盖网易会员点歌:wy_member"
+                        ]
+                    },
+                    "default_sub_source": {
+                        "description": "默认子音源",
+                        "hint": "触发词没有显式指定子音源时使用的平台。第三方上游可用性可能随时变化。",
+                        "type": "string",
+                        "options": [
+                            "qs",
+                            "kw",
+                            "zxl",
+                            "bd",
+                            "wy_vip",
+                            "qq",
+                            "wy_member"
+                        ],
+                        "labels": [
+                            "汽水音乐",
+                            "酷我音乐",
+                            "QQ 音乐源分支",
+                            "QQ 音乐友链",
+                            "网易云 VIP",
+                            "QQ 音乐",
+                            "网易会员版"
+                        ],
+                        "default": "qq"
+                    },
+                    "proxy": {
+                        "description": "代理地址",
+                        "hint": "此地址仅用于该音源的网络请求；留空表示直连。示例：http://127.0.0.1:7890。",
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            },
             "neko": {
-                "name": "Neko 云音乐",
+                "name": "Neko云音乐",
                 "items": {
                     "priority": {
                         "description": "优先级",
@@ -647,6 +714,58 @@
                             "Hi-Res"
                         ],
                         "default": "hq"
+                    },
+                    "proxy": {
+                        "description": "代理地址",
+                        "hint": "此地址仅用于该音源的网络请求；留空表示直连。示例：http://127.0.0.1:7890。",
+                        "type": "string",
+                        "default": ""
+                    }
+                }
+            },
+            "xunhuisi": {
+                "name": "巡回寺Q音",
+                "items": {
+                    "priority": {
+                        "description": "优先级",
+                        "hint": "数值越小越优先；未指定平台的“点歌”会按优先级依次回退。重复优先级会自动调整，音源配置按优先级排序。",
+                        "type": "int",
+                        "slider": {
+                            "min": 1,
+                            "max": 100,
+                            "step": 1
+                        },
+                        "default": 75
+                    },
+                    "enable": {
+                        "description": "启用此音源",
+                        "hint": "关闭后此音源不会参与命令匹配或搜索。",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "trigger_words": {
+                        "description": "触发词",
+                        "hint": "巡回寺 QQ音乐音源的点歌触发词。",
+                        "type": "list",
+                        "default": [
+                            "巡回寺点歌"
+                        ]
+                    },
+                    "quality": {
+                        "description": "文件音质",
+                        "hint": "音频解析及文件模式使用的音质。",
+                        "type": "string",
+                        "options": [
+                            "standard",
+                            "high",
+                            "lossless"
+                        ],
+                        "labels": [
+                            "标准音质（128kbps）",
+                            "高音质（320kbps）",
+                            "无损音质（FLAC）"
+                        ],
+                        "default": "high"
                     },
                     "proxy": {
                         "description": "代理地址",

@@ -230,6 +230,7 @@ class MusicStore:
                 "cover_url",
                 "page_url",
                 "card_type",
+                "quality",
                 "note",
                 "album_id",
                 "album_audio_id",

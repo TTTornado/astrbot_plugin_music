@@ -294,10 +294,14 @@ class NekoMusic(BaseMusicPlayer):
         media_url = data.get("url") if isinstance(data, Mapping) else None
         if (
             isinstance(result, Mapping)
+            and isinstance(data, Mapping)
             and result.get("success")
             and isinstance(media_url, str)
         ):
             song.audio_url = urljoin(f"{self.base_url}/", media_url)
+            quality = data.get("quality")
+            if isinstance(quality, (str, int, float)) and not isinstance(quality, bool):
+                song.quality = str(quality)
         else:
             logger.warning(f"Neko Music did not return an audio URL for song {song.id}")
         return song
@@ -351,11 +355,19 @@ class NekoMusic(BaseMusicPlayer):
         media_url = data.get("url") if isinstance(data, Mapping) else None
         if (
             isinstance(result, Mapping)
+            and isinstance(data, Mapping)
             and result.get("success")
             and isinstance(media_url, str)
             and media_url
         ):
             song.audio_url = urljoin(f"{self.base_url}/", media_url)
+            quality_value = data.get("quality")
+            song.quality = (
+                str(quality_value)
+                if isinstance(quality_value, (str, int, float))
+                and not isinstance(quality_value, bool)
+                else requested_quality
+            )
         if not song.audio_url:
             return None
         suffix = Path(urlparse(song.audio_url).path).suffix.lower()

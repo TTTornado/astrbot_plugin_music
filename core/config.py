@@ -161,8 +161,10 @@ class MusicPlayerConfig(ConfigNodeContainer):
     kugou_api: MusicPlayerItem
     soda: MusicPlayerItem
     txqq: MusicPlayerItem
+    hgovo: MusicPlayerItem
     neko: MusicPlayerItem
     apple: MusicPlayerItem
+    xunhuisi: MusicPlayerItem
 
     def __init__(self, nodes: list[dict[str, Any]]):
         super().__init__(nodes, item_cls=MusicPlayerItem)

@@ -219,6 +219,14 @@ class NetEaseMusic(BaseMusicPlayer):
         if isinstance(result, dict):
             if not song.audio_url and isinstance(result.get("url"), str):
                 song.audio_url = result["url"]
+                bitrate = result.get("br")
+                if (
+                    isinstance(bitrate, (int, float))
+                    and not isinstance(bitrate, bool)
+                    and bitrate > 0
+                ):
+                    kbps = int(bitrate / 1000) if bitrate >= 1000 else int(bitrate)
+                    song.quality = f"{kbps}kbps"
             if not song.lyrics and isinstance(result.get("lrc"), str):
                 song.lyrics = result["lrc"]
             cover_url = song.cover_url or result.get("pic")

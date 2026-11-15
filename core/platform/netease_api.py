@@ -231,5 +231,13 @@ class NetEaseMusicAPI(BaseMusicPlayer):
             song.note = f"使用第三方替代音源（{source}），完整性及版本未核验。"
         if audio_url and song.audio_url is None:
             song.audio_url = audio_url
+            bitrate = info.get("br")
+            if (
+                isinstance(bitrate, (int, float))
+                and not isinstance(bitrate, bool)
+                and bitrate > 0
+            ):
+                kbps = int(bitrate / 1000) if bitrate >= 1000 else int(bitrate)
+                song.quality = f"{kbps}kbps"
 
         return song

@@ -53,29 +53,6 @@
     "proxy": ""
   },
   {
-    "__template_key": "txqq",
-    "enable": true,
-    "priority": 60,
-    "trigger_words": [
-      "TXQQ点歌:qq",
-      "网易云音乐:netease",
-      "酷狗音乐:kugou",
-      "酷我音乐:kuwo",
-      "百度音乐:baidu",
-      "一听音乐:1ting",
-      "咪咕音乐:migu",
-      "荔枝FM:lizhi",
-      "蜻蜓FM:qingting",
-      "喜马拉雅:ximalaya",
-      "5sing原创:5singyc",
-      "5sing翻唱:5singfc",
-      "全民K歌:kg"
-    ],
-    "default_sub_source": "qq",
-    "cookies": "",
-    "proxy": ""
-  },
-  {
     "__template_key": "neko",
     "enable": true,
     "priority": 70,
