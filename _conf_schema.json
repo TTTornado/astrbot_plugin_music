@@ -349,7 +349,7 @@
                     },
                     "uin": {
                         "description": "绑定 QQ 号",
-                        "hint": "必填。填写用于 QQ 音乐搜索的 QQ 号，不要求绿钻会员；未填写时该音源不会返回搜索结果。",
+                        "hint": "选填。登录后用于提升完整歌曲和高音质取链成功率；匿名搜索不依赖此项。",
                         "type": "string",
                         "default": "10001"
                     },
@@ -358,6 +358,22 @@
                         "hint": "选填。可填写网页端 QQ 音乐 Cookie；仅包含有效 qqmusic_key 或 qm_keyst 的 Cookie 会被发送。",
                         "type": "text",
                         "default": ""
+                    },
+                    "quality": {
+                        "description": "文件音质",
+                        "hint": "仅文件模式使用此音质；语音和卡片使用标准音质。所选音质不可用时自动回退到标准音质。",
+                        "type": "string",
+                        "options": [
+                            "standard",
+                            "exhigh",
+                            "lossless"
+                        ],
+                        "labels": [
+                            "标准（128K）",
+                            "较高（320K）",
+                            "无损（FLAC）"
+                        ],
+                        "default": "lossless"
                     },
                     "proxy": {
                         "description": "代理地址",
@@ -490,7 +506,7 @@
                 }
             },
             "txqq": {
-                "name": "TXQQ 聚合音源",
+                "name": "TXQQ",
                 "items": {
                     "priority": {
                         "description": "优先级",

@@ -29,7 +29,7 @@
                                 "apiEnhanced":  "api-enhanced",
                                 "kugouApi":  "KuGouMusic API",
                                 "kuwoReference":  "nonebot-plugin-kuwo",
-                                "txqqService":  "TXQQ aggregated source",
+                                "txqqService":  "TXQQ music aggregation service",
                                 "maintainerRole":  "Plugin development and maintenance",
                                 "qqCodeRole":  "QQ Music implementation",
                                 "kuwoRole":  "Kuwo Music implementation reference",

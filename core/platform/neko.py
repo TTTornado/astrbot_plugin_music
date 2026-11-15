@@ -19,7 +19,7 @@ class NekoMusic(BaseMusicPlayer):
 
     platform: ClassVar[Platform] = Platform(
         name="neko",
-        display_name="Neko 云音乐",
+        display_name="Neko云音乐",
     )
     supported_audio_qualities: ClassVar[tuple[str, ...]] = (
         "standard",

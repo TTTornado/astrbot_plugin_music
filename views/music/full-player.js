@@ -56,7 +56,7 @@ export function createFullPlayer({
         element.type = "button";
         element.className = "lyric-line";
         element.textContent = line.text;
-        element.addEventListener("click", () => player.seek(line.time));
+        element.addEventListener("click", () => player.seekTo(line.time));
         element.dataset.index = String(index);
         elements.lyrics.append(element);
       });

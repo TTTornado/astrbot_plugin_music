@@ -26,16 +26,29 @@ class QQMusic(BaseMusicPlayer):
     )
 
     API_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+    SONG_DETAIL_API_URL = "https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg"
     supports_playlist_import = True
+    supported_audio_qualities: ClassVar[tuple[str, ...]] = (
+        "standard",
+        "exhigh",
+        "lossless",
+    )
     LYRIC_API_URL = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
     COMMENTS_API_URL = "https://c.y.qq.com/base/fcgi-bin/fcg_global_comment_h5.fcg"
-    DOWNLOAD_HEADERS: ClassVar[dict[str, str]] = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0"
+    QUALITY_FILES: ClassVar[dict[str, tuple[tuple[str, str], ...]]] = {
+        "standard": (("M500", "mp3"),),
+        "exhigh": (("M800", "mp3"),),
+        "lossless": (
+            ("F000", "flac"),
+            ("Q000", "flac"),
+            ("Q001", "flac"),
+            ("O801", "flac"),
         ),
-        "Referer": "https://y.qq.com/",
+    }
+    URL_VKEY_FILES: ClassVar[dict[str, tuple[str, str]]] = {
+        "standard": ("C400", "m4a"),
+        "exhigh": ("M800", "mp3"),
+        "lossless": ("F000", "flac"),
     }
     HEADERS: ClassVar[dict[str, str]] = {
         "User-Agent": (
@@ -43,13 +56,16 @@ class QQMusic(BaseMusicPlayer):
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0"
         ),
-        "Content-Type": "application/json",
         "Referer": "https://y.qq.com/",
-        "Accept-Encoding": "gzip",
     }
 
     def __init__(self, config: PluginConfig):
         super().__init__(config)
+        proxy = self.platform_cfg.proxy or None
+        proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler(proxy_handler)
+        )
 
     @staticmethod
     def hash33(value: str, seed: int = 5381) -> int:
@@ -92,12 +108,9 @@ class QQMusic(BaseMusicPlayer):
         Returns:
             Image bytes, or None if the request fails.
         """
-        request = urllib.request.Request(url, headers=self.DOWNLOAD_HEADERS)
-        proxy = self.platform_cfg.proxy or None
-        proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy_handler))
+        request = urllib.request.Request(url, headers=self.HEADERS)
         try:
-            response = await asyncio.to_thread(opener.open, request, timeout=20)
+            response = await asyncio.to_thread(self._opener.open, request, timeout=20)
             try:
                 if response.status != 200:
                     logger.warning(f"QQ Music cover returned HTTP {response.status}")
@@ -112,26 +125,33 @@ class QQMusic(BaseMusicPlayer):
     async def download_audio(
         self, song: Song, quality: str | None = None
     ) -> Path | None:
-        """Download QQ Music audio with urllib.
+        """Resolve and download the requested QQ Music audio quality.
 
         Args:
             song: Song whose audio URL should be downloaded.
-            quality: Requested audio quality, ignored by this platform.
+            quality: Requested audio quality, falling back to standard.
 
         Returns:
             Path to the downloaded file, or None if the request fails.
         """
-        del quality
+        requested_quality = quality or self.platform_cfg.quality or "standard"
+        if requested_quality not in self.supported_audio_qualities:
+            logger.warning(
+                f"Unsupported QQ Music quality {requested_quality}; using standard"
+            )
+            requested_quality = "standard"
+        if requested_quality != "standard" or not song.audio_url:
+            await self._resolve_audio(song, requested_quality)
         if not song.audio_url:
             return None
         self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
-        file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}.mp3"
-        request = urllib.request.Request(song.audio_url, headers=self.DOWNLOAD_HEADERS)
-        proxy = self.platform_cfg.proxy or None
-        proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy_handler))
+        suffix = Path(urllib.parse.urlparse(song.audio_url).path).suffix.lower()
+        if suffix not in {".mp3", ".flac", ".m4a", ".aac"}:
+            suffix = ".mp3"
+        file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}{suffix}"
+        request = urllib.request.Request(song.audio_url, headers=self.HEADERS)
         try:
-            response = await asyncio.to_thread(opener.open, request, timeout=30)
+            response = await asyncio.to_thread(self._opener.open, request, timeout=30)
             try:
                 if response.status != 200:
                     logger.warning(f"QQ Music audio returned HTTP {response.status}")
@@ -150,17 +170,127 @@ class QQMusic(BaseMusicPlayer):
 
     @staticmethod
     def _get_response_song_list(data: dict[str, Any] | None) -> list[dict[str, Any]]:
-        value: Any = data
-        for key in ("req", "data", "body", "song", "list"):
-            if not isinstance(value, dict):
-                return []
-            value = value.get(key)
-        return value if isinstance(value, list) else []
+        request = data.get("req") if isinstance(data, dict) else None
+        response = request.get("data") if isinstance(request, dict) else None
+        body = response.get("body") if isinstance(response, dict) else None
+        if not isinstance(body, dict):
+            return []
+        song = body.get("item_song") or body.get("song")
+        if not isinstance(song, dict):
+            return []
+        items = song.get("items") or song.get("list")
+        return items if isinstance(items, list) else []
+
+    def _song_from_item(self, item: dict[str, Any]) -> Song | None:
+        """Normalize a QQ Music track returned by search, detail, or playlists.
+
+        Args:
+            item: QQ Music track payload.
+
+        Returns:
+            A normalized song, or None when the payload lacks a song MID.
+        """
+        song_mid = str(item.get("mid") or item.get("songmid") or "").strip()
+        if not song_mid:
+            return None
+        singer_names = [
+            str(singer["name"])
+            for singer in item.get("singer", [])
+            if isinstance(singer, dict) and singer.get("name")
+        ]
+        album = item.get("album") or {}
+        if not isinstance(album, dict):
+            album = {}
+        album_mid = str(album.get("mid") or item.get("albummid") or "")
+        interval = item.get("interval") or 0
+        return Song(
+            id=str(item.get("id") or item.get("songid") or song_mid),
+            source=self.platform.name,
+            card_type="qq",
+            name=item.get("name") or item.get("songname"),
+            artists="/".join(singer_names),
+            duration=int(interval) * 1000 if interval else None,
+            cover_url=(
+                f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg"
+                if album_mid
+                else None
+            ),
+            page_url=f"https://y.qq.com/n/ryqq/songDetail/{song_mid}",
+            audio_url=None,
+            note=song_mid,
+        )
+
+    async def _get_json(
+        self,
+        url: str,
+        params: dict[str, Any],
+        *,
+        cookie: str = "",
+    ) -> dict[str, Any] | None:
+        """Request a QQ Music JSON endpoint through the configured proxy.
+
+        Args:
+            url: Endpoint URL.
+            params: Query parameters.
+            cookie: Optional QQ Music Cookie header.
+
+        Returns:
+            The decoded JSON object, or None when the request fails.
+        """
+        headers = dict(self.HEADERS)
+        if cookie:
+            headers["Cookie"] = cookie
+        request = urllib.request.Request(
+            f"{url}?{urllib.parse.urlencode(params)}", headers=headers
+        )
+        try:
+            response = await asyncio.to_thread(self._opener.open, request, timeout=15)
+            try:
+                if response.status != 200:
+                    logger.warning(f"QQ Music API returned HTTP {response.status}")
+                    return None
+                raw = await asyncio.to_thread(response.read)
+            finally:
+                response.close()
+            result = json.loads(raw.decode("utf-8", "ignore"))
+            return result if isinstance(result, dict) else None
+        except Exception as exc:
+            logger.warning(f"QQ Music API request failed: {exc}")
+            return None
+
+    async def _fetch_song_detail(self, song_mid: str) -> dict[str, Any] | None:
+        """Fetch the current QQ Music track payload for a song MID.
+
+        Args:
+            song_mid: QQ Music string song MID.
+
+        Returns:
+            The first track payload, or None when unavailable.
+        """
+        result = await self._get_json(
+            self.SONG_DETAIL_API_URL,
+            {
+                "songmid": song_mid,
+                "tp": "yqq_song_detail",
+                "format": "json",
+            },
+            cookie=self._get_cookie(),
+        )
+        items = result.get("data") if isinstance(result, dict) else None
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+        return None
 
     async def _post_musicu(
         self, body: dict[str, Any], cookie: str
     ) -> dict[str, Any] | None:
         headers = dict(self.HEADERS)
+        headers.update(
+            {
+                "Content-Type": "application/json",
+                "Accept-Encoding": "gzip",
+            }
+        )
         if cookie:
             headers["Cookie"] = cookie
 
@@ -171,12 +301,7 @@ class QQMusic(BaseMusicPlayer):
             method="POST",
         )
         try:
-            proxy = self.platform_cfg.proxy or None
-            proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler(proxy_handler)
-            )
-            response = await asyncio.to_thread(opener.open, request, timeout=15)
+            response = await asyncio.to_thread(self._opener.open, request, timeout=15)
             try:
                 if response.status != 200:
                     logger.warning(f"QQ Music API returned HTTP {response.status}")
@@ -208,74 +333,51 @@ class QQMusic(BaseMusicPlayer):
         """
         del extra
         cookie = self._get_cookie()
-        configured_uin = (self.platform_cfg.uin or "").strip()
-        if not configured_uin:
-            logger.warning("QQ Music UIN is not configured")
-            return []
-        body = {
-            "comm": {
-                "ct": "19",
-                "cv": "1859",
-                "uin": configured_uin,
-                "g_tk": self.get_gtk(cookie),
-            },
-            "req": {
-                "module": "music.search.SearchCgiService",
-                "method": "DoSearchForQQMusicDesktop",
-                "param": {
-                    # Larger pages can return an empty list with a success code.
-                    "num_per_page": min(limit, 50),
-                    "page_num": 1,
-                    "query": keyword,
-                    "search_type": 0,
+        configured_uin = (self.platform_cfg.uin or "").strip() or "0"
+        page_size = min(max(limit, 1), 50)
+        requests = [
+            {
+                "comm": {"ct": "24", "cv": "0"},
+                "req": {
+                    "module": "music.adaptor.SearchAdaptor",
+                    "method": "do_search_v2",
+                    "param": {
+                        "query": keyword,
+                        "search_type": 0,
+                        "page_num": 1,
+                        "num_per_page": page_size,
+                    },
                 },
             },
-        }
-
-        data = None
-        for attempt in range(4):
-            data = await self._post_musicu(body, cookie)
-            if self._get_response_song_list(data):
-                break
-            if attempt < 3:
-                await asyncio.sleep(0.8 + 0.6 * attempt)
-
-        songs: list[Song] = []
-        for item in self._get_response_song_list(data):
-            singer_names: list[str] = []
-            for singer in item.get("singer", []):
-                if isinstance(singer, dict):
-                    singer_name = singer.get("name")
-                    if isinstance(singer_name, str) and singer_name:
-                        singer_names.append(singer_name)
-            singers = "/".join(singer_names)
-            album = item.get("album") or {}
-            album_mid = album.get("mid") or ""
-            cover_url = (
-                f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg"
-                if album_mid
-                else None
-            )
-            interval = item.get("interval") or 0
-            songs.append(
-                Song(
-                    id=str(item.get("id") or ""),
-                    source=self.platform.name,
-                    card_type="qq",
-                    name=item.get("name"),
-                    artists=singers,
-                    duration=interval * 1000 if interval else None,
-                    cover_url=cover_url,
-                    page_url=(
-                        f"https://y.qq.com/n/ryqq/songDetail/{item['mid']}"
-                        if item.get("mid")
-                        else None
-                    ),
-                    audio_url=None,
-                    note=item.get("mid") or "",
-                )
-            )
-        return songs
+            {
+                "comm": {
+                    "ct": "19",
+                    "cv": "1859",
+                    "uin": configured_uin,
+                    "g_tk": self.get_gtk(cookie),
+                },
+                "req": {
+                    "module": "music.search.SearchCgiService",
+                    "method": "DoSearchForQQMusicDesktop",
+                    "param": {
+                        "num_per_page": page_size,
+                        "page_num": 1,
+                        "query": keyword,
+                        "search_type": 0,
+                    },
+                },
+            },
+        ]
+        for body in requests:
+            for attempt in range(2):
+                data = await self._post_musicu(body, cookie)
+                items = self._get_response_song_list(data)
+                if items:
+                    songs = [self._song_from_item(item) for item in items]
+                    return [song for song in songs if song is not None][:limit]
+                if attempt == 0:
+                    await asyncio.sleep(0.4)
+        return []
 
     async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
         """Fetch a QQ Music playlist through musicu.fcg.
@@ -311,69 +413,69 @@ class QQMusic(BaseMusicPlayer):
             raise ValueError("playlist import limit must be between 1 and 1000")
 
         cookie = self._get_cookie()
-        configured_uin = (self.platform_cfg.uin or "").strip() or "10001"
-        body = {
-            "comm": {
-                "ct": "19",
-                "cv": "1859",
-                "uin": configured_uin,
-                "g_tk": self.get_gtk(cookie),
-            },
-            "req": {
-                "module": "music.srfDissInfo.aiDissInfo",
-                "method": "uniform_get_Dissinfo",
-                "param": {
-                    "disstid": int(playlist_id),
-                    "enc_host_uin": "",
-                    "tag": 1,
-                    "userinfo": 1,
-                    "song_begin": 0,
-                    "song_num": limit,
-                },
-            },
-        }
-        result = await self._post_musicu(body, cookie)
-        response = result.get("req") if isinstance(result, dict) else None
-        data = response.get("data") if isinstance(response, dict) else None
-        items = data.get("songlist") if isinstance(data, dict) else None
-        metadata = data.get("dirinfo") if isinstance(data, dict) else None
-        if not isinstance(items, list) or not isinstance(metadata, dict):
-            raise RuntimeError("QQ Music could not load playlist")
-
         songs: list[Song] = []
-        for item in items[:limit]:
-            if not isinstance(item, dict) or not item.get("id") or not item.get("mid"):
-                continue
-            singer_names: list[str] = []
-            for singer in item.get("singer", []):
-                if isinstance(singer, dict):
-                    singer_name = singer.get("name")
-                    if isinstance(singer_name, str) and singer_name:
-                        singer_names.append(singer_name)
-            singers = "/".join(singer_names)
-            album = item.get("album") or {}
-            album_mid = album.get("mid") if isinstance(album, dict) else ""
-            interval = item.get("interval") or 0
-            songs.append(
-                Song(
-                    id=str(item["id"]),
-                    source=self.platform.name,
-                    card_type="qq",
-                    name=item.get("name"),
-                    artists=singers,
-                    duration=interval * 1000 if interval else None,
-                    cover_url=(
-                        f"https://y.gtimg.cn/music/photo_new/"
-                        f"T002R300x300M000{album_mid}.jpg"
-                        if album_mid
-                        else None
-                    ),
-                    page_url=f"https://y.qq.com/n/ryqq/songDetail/{item['mid']}",
-                    note=str(item["mid"]),
-                )
+        metadata: dict[str, Any] | None = None
+        total = 0
+        offset = 0
+        seen_pages: set[tuple[str, ...]] = set()
+        while len(songs) < limit:
+            page_size = min(100, limit - len(songs))
+            body = {
+                "comm": {"ct": "24", "cv": "0"},
+                "req": {
+                    "module": "music.srfDissInfo.DissInfo",
+                    "method": "CgiGetDiss",
+                    "param": {
+                        "disstid": int(playlist_id),
+                        "dirid": 0,
+                        "tag": False,
+                        "song_begin": offset,
+                        "song_num": page_size,
+                        "userinfo": False,
+                        "orderlist": False,
+                        "onlysonglist": True,
+                    },
+                },
+            }
+            result = await self._post_musicu(body, cookie)
+            response = result.get("req") if isinstance(result, dict) else None
+            data = response.get("data") if isinstance(response, dict) else None
+            if not isinstance(data, dict):
+                raise RuntimeError("QQ Music could not load playlist")
+            if metadata is None and isinstance(data.get("dirinfo"), dict):
+                metadata = data["dirinfo"]
+                total = int(metadata.get("songnum") or 0)  # type: ignore
+            items = data.get("songlist")
+            if not isinstance(items, list):
+                raise RuntimeError("QQ Music returned an invalid playlist page")
+            if not items:
+                if total and offset < min(total, limit):
+                    raise RuntimeError(
+                        "QQ Music playlist ended before its declared total"
+                    )
+                break
+            page_identity = tuple(
+                str(item.get("mid") or item.get("songmid") or "")
+                for item in items
+                if isinstance(item, dict)
             )
+            if page_identity in seen_pages:
+                raise RuntimeError("QQ Music returned the same playlist page twice")
+            seen_pages.add(page_identity)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                song = self._song_from_item(item)
+                if song is not None:
+                    songs.append(song)
+                    if len(songs) >= limit:
+                        break
+            offset += len(items)
+            if len(items) < page_size or total and offset >= total:
+                break
         if not songs:
             raise RuntimeError("QQ Music playlist is empty or unavailable")
+        metadata = metadata or {}
         creator = metadata.get("creator")
         return Playlist(
             id=playlist_id,
@@ -389,36 +491,26 @@ class QQMusic(BaseMusicPlayer):
             description=metadata.get("desc"),
         )
 
-    async def _fetch_preview_audio(
-        self, song: Song, configured_uin: str, uin: int
-    ) -> Song:
-        """Resolve a QQ Music preview URL using the song's official song MID.
+    async def _fetch_preview_audio(self, song: Song, media_mid: str) -> Song:
+        """Resolve an anonymous QQ Music preview URL.
 
         Args:
             song: Song whose preview URL should be resolved.
-            configured_uin: QQ Music UIN as configured by the user.
-            uin: Validated numeric QQ Music UIN.
+            media_mid: QQ Music media MID from the song detail response.
 
         Returns:
             The song with a preview URL when QQ Music provides one.
         """
         body = {
-            "comm": {
-                "uin": uin,
-                "format": "json",
-                "ct": 24,
-                "cv": 0,
-            },
             "req_0": {
-                "module": "vkey.GetVkeyServer",
-                "method": "CgiGetVkey",
+                "module": "music.vkey.GetVkey",
+                "method": "UrlGetVkey",
                 "param": {
-                    "filename": [f"RS02{song.note}{song.note}.mp3"],
-                    "guid": "10000",
+                    "filename": [f"RS02{media_mid}.mp3"],
+                    "guid": uuid.uuid4().hex,
                     "songmid": [song.note],
-                    "songtype": [0],
-                    "uin": configured_uin,
-                    "loginflag": 1,
+                    "uin": "0",
+                    "loginflag": 0,
                     "platform": "20",
                 },
             },
@@ -439,12 +531,215 @@ class QQMusic(BaseMusicPlayer):
             and isinstance(url_info[0], dict)
             and url_info[0].get("purl")
         ):
-            song.audio_url = servers[0] + url_info[0]["purl"]
-        else:
-            logger.warning(
-                f"QQ Music did not return a preview URL for song {song.note}"
-            )
+            preview_url = self._media_url(str(servers[0]), str(url_info[0]["purl"]))
+            if await self._probe_audio_url(preview_url):
+                song.audio_url = preview_url
+                return song
+        song.audio_url = None
+        logger.warning(
+            f"QQ Music did not return a playable preview URL for song {song.note}"
+        )
         return song
+
+    @staticmethod
+    def _media_url(server: str, path: str) -> str:
+        """Join a QQ Music media server and signed path using HTTPS.
+
+        Args:
+            server: Media server URL returned by QQ Music.
+            path: Signed relative media path.
+
+        Returns:
+            A normalized absolute media URL.
+        """
+        url = f"{server.rstrip('/')}/{path.lstrip('/')}"
+        return re.sub(r"^http:", "https:", url, flags=re.IGNORECASE)
+
+    async def _probe_audio_url(self, url: str) -> bool:
+        """Check that a signed QQ Music URL serves audio rather than an error body.
+
+        Args:
+            url: Signed media URL returned by a QQ Music vkey endpoint.
+
+        Returns:
+            True when a small range request returns plausible audio bytes.
+        """
+        headers = dict(self.HEADERS)
+        headers["Range"] = "bytes=0-31"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            response = await asyncio.to_thread(self._opener.open, request, timeout=8)
+            try:
+                if response.status not in {200, 206}:
+                    return False
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                head = await asyncio.to_thread(response.read, 32)
+            finally:
+                response.close()
+        except Exception as exc:
+            logger.debug(f"QQ Music audio URL probe failed: {exc}")
+            return False
+        if not head or "json" in content_type or "text/" in content_type:
+            return False
+        is_audio_header = (
+            head.startswith((b"ID3", b"fLaC", b"OggS", b"RIFF"))
+            or len(head) >= 8
+            and head[4:8] == b"ftyp"
+            or len(head) >= 2
+            and head[0] == 0xFF
+            and head[1] & 0xE0 == 0xE0
+        )
+        return content_type.startswith("audio/") or is_audio_header
+
+    def _apply_song_detail(self, song: Song, detail: dict[str, Any]) -> None:
+        """Fill missing normalized fields from a QQ Music detail payload.
+
+        Args:
+            song: Song to update in place.
+            detail: QQ Music track detail payload.
+        """
+        normalized = self._song_from_item(detail)
+        if normalized is None:
+            return
+        song.id = normalized.id or song.id
+        song.name = normalized.name or song.name
+        song.artists = normalized.artists or song.artists
+        song.duration = normalized.duration or song.duration
+        song.cover_url = normalized.cover_url or song.cover_url
+        song.page_url = normalized.page_url or song.page_url
+        song.note = normalized.note or song.note
+
+    async def _resolve_audio(self, song: Song, quality: str) -> Song:
+        """Resolve an official QQ Music URL with quality and standard fallback.
+
+        Args:
+            song: Song carrying a QQ Music string MID in ``note``.
+            quality: One of the adapter's supported audio quality identifiers.
+
+        Returns:
+            The song with an audio URL when an official endpoint provides one.
+        """
+        if not song.note:
+            return song
+        existing_audio_url = song.audio_url
+        cookie = self._get_cookie()
+        configured_uin = (self.platform_cfg.uin or "").strip() or "0"
+        detail = await self._fetch_song_detail(song.note)
+        if detail:
+            self._apply_song_detail(song, detail)
+        song_mid = str((detail or {}).get("mid") or song.note)
+        file_info = (detail or {}).get("file") or {}
+        media_mid = (
+            str(file_info.get("media_mid") if isinstance(file_info, dict) else "")
+            or song_mid
+        )
+        cookie_values = self._cookie_values(cookie)
+        authst = cookie_values.get("qm_keyst") or cookie_values.get("qqmusic_key")
+        qualities = [quality]
+        if quality != "standard":
+            qualities.append("standard")
+
+        for candidate_quality in qualities:
+            file_specs = self.QUALITY_FILES[candidate_quality]
+            filenames = [
+                f"{prefix}{media_mid}.{extension}" for prefix, extension in file_specs
+            ]
+            comm: dict[str, Any] = {
+                "ct": 24,
+                "cv": 4747474,
+                "tmeAppID": "qqmusic",
+                "format": "json",
+                "uin": configured_uin,
+            }
+            params: dict[str, Any] = {
+                "guid": uuid.uuid4().hex,
+                "filename": filenames,
+                "songmid": [song_mid],
+                "songtype": [0],
+                "uin": configured_uin,
+                "loginflag": 1 if authst else 0,
+                "platform": "20",
+            }
+            if authst:
+                comm.update({"qq": configured_uin, "authst": authst})
+            body = {
+                "comm": comm,
+                "req_0": {
+                    "module": "vkey.GetVkeyServer",
+                    "method": "CgiGetVkey",
+                    "param": params,
+                },
+            }
+            data = await self._post_musicu(body, cookie)
+            request_data = data.get("req_0") if isinstance(data, dict) else None
+            response_data = (
+                request_data.get("data") if isinstance(request_data, dict) else None
+            )
+            if isinstance(response_data, dict):
+                servers = response_data.get("sip") or []
+                server = (
+                    str(servers[0])
+                    if isinstance(servers, list) and servers
+                    else "https://wx.music.tc.qq.com/"
+                )
+                url_by_filename = {
+                    str(item.get("filename")): str(item.get("purl"))
+                    for item in response_data.get("midurlinfo") or []
+                    if isinstance(item, dict)
+                    and item.get("filename")
+                    and item.get("purl")
+                }
+                for filename in filenames:
+                    if purl := url_by_filename.get(filename):
+                        media_url = self._media_url(server, purl)
+                        if await self._probe_audio_url(media_url):
+                            song.audio_url = media_url
+                            return song
+
+            prefix, extension = self.URL_VKEY_FILES[candidate_quality]
+            filename = f"{prefix}{song_mid}.{extension}"
+            body = {
+                "req_0": {
+                    "module": "music.vkey.GetVkey",
+                    "method": "UrlGetVkey",
+                    "param": {
+                        "guid": uuid.uuid4().hex,
+                        "songmid": [song_mid],
+                        "filename": [filename],
+                        "uin": configured_uin,
+                        "loginflag": 1 if authst else 0,
+                        "platform": "20",
+                    },
+                }
+            }
+            data = await self._post_musicu(body, cookie)
+            request_data = data.get("req_0") if isinstance(data, dict) else None
+            response_data = (
+                request_data.get("data") if isinstance(request_data, dict) else None
+            )
+            if isinstance(response_data, dict):
+                url_info = response_data.get("midurlinfo") or []
+                first = url_info[0] if isinstance(url_info, list) and url_info else None
+                if isinstance(first, dict) and first.get("purl"):
+                    servers = response_data.get("sip") or []
+                    server = (
+                        str(servers[0])
+                        if isinstance(servers, list) and servers
+                        else "https://wx.music.tc.qq.com/"
+                    )
+                    media_url = self._media_url(server, str(first["purl"]))
+                    if await self._probe_audio_url(media_url):
+                        song.audio_url = media_url
+                        return song
+
+        logger.info(
+            f"QQ Music did not return a {quality} audio URL for song {song_mid}; "
+            "using the existing standard URL or preview"
+        )
+        if existing_audio_url:
+            song.audio_url = existing_audio_url
+            return song
+        return await self._fetch_preview_audio(song, media_mid)
 
     async def fetch_extra(self, song: Song) -> Song:
         """Resolve a QQ Music full or preview URL using the official song MID.
@@ -457,66 +752,7 @@ class QQMusic(BaseMusicPlayer):
         """
         if song.audio_url or not song.note:
             return song
-
-        configured_uin = (self.platform_cfg.uin or "").strip()
-        if not configured_uin:
-            logger.warning("QQ Music UIN is not configured; cannot resolve audio")
-            return song
-        try:
-            uin = int(configured_uin)
-        except ValueError:
-            logger.warning("QQ Music UIN must be numeric; cannot resolve audio")
-            return song
-
-        cookie = self._get_cookie()
-        if not cookie:
-            return await self._fetch_preview_audio(song, configured_uin, uin)
-
-        body = {
-            "comm": {
-                "uin": uin,
-                "format": "json",
-                "ct": 24,
-                "cv": 0,
-            },
-            "req_0": {
-                "module": "vkey.GetVkeyServer",
-                "method": "CgiGetVkey",
-                "param": {
-                    "filename": [f"M500{song.note}{song.note}.mp3"],
-                    "guid": "10000",
-                    "songmid": [song.note],
-                    "songtype": [0],
-                    "uin": configured_uin,
-                    "loginflag": 1,
-                    "platform": "20",
-                },
-            },
-        }
-        data = await self._post_musicu(body, cookie)
-        request_data = data.get("req_0") if data else None
-        response_data = (
-            request_data.get("data") if isinstance(request_data, dict) else None
-        )
-        if not isinstance(response_data, dict):
-            response_data = {}
-        servers = response_data.get("sip") or []
-        url_info = response_data.get("midurlinfo") or []
-        if (
-            servers
-            and isinstance(url_info, list)
-            and url_info
-            and isinstance(url_info[0], dict)
-            and url_info[0].get("purl")
-        ):
-            song.audio_url = servers[0] + url_info[0]["purl"]
-        else:
-            logger.info(
-                f"QQ Music did not return a full audio URL for song {song.note}; "
-                "falling back to preview"
-            )
-            return await self._fetch_preview_audio(song, configured_uin, uin)
-        return song
+        return await self._resolve_audio(song, "standard")
 
     async def fetch_lyrics(self, song: Song) -> Song:
         """Fetch QQ Music lyrics by song ID, falling back to song MID.
@@ -537,42 +773,28 @@ class QQMusic(BaseMusicPlayer):
             identifiers.append(("songmid", song.note))
 
         for identifier, value in identifiers:
-            params = urllib.parse.urlencode(
+            result = await self._get_json(
+                self.LYRIC_API_URL,
                 {
-                    "nobase64": 1,
-                    identifier: value,
-                    "songtype": 0,
-                    "loginUin": 0,
+                    "g_tk": 5381,
                     "format": "json",
-                }
+                    "inCharset": "utf-8",
+                    "outCharset": "utf-8",
+                    "notice": 0,
+                    "platform": "h5",
+                    "needNewCode": 1,
+                    "ct": 121,
+                    "cv": 0,
+                    "nobase64": 1,
+                    "songtype": 0,
+                    identifier: value,
+                },
+                cookie=self._get_cookie(),
             )
-            request = urllib.request.Request(
-                f"{self.LYRIC_API_URL}?{params}", headers=self.DOWNLOAD_HEADERS
-            )
-            try:
-                proxy = self.platform_cfg.proxy or None
-                proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
-                opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler(proxy_handler)
-                )
-                response = await asyncio.to_thread(opener.open, request, timeout=15)
-                try:
-                    if response.status != 200:
-                        logger.warning(
-                            f"QQ Music lyric API returned HTTP {response.status}"
-                        )
-                        continue
-                    raw = await asyncio.to_thread(response.read)
-                finally:
-                    response.close()
-
-                result = json.loads(raw.decode("utf-8", "ignore"))
-                lyric = result.get("lyric") if isinstance(result, dict) else None
-                if isinstance(lyric, str) and lyric.strip():
-                    song.lyrics = lyric
-                    return song
-            except Exception as exc:
-                logger.warning(f"QQ Music lyric request failed: {exc}")
+            lyric = result.get("lyric") if isinstance(result, dict) else None
+            if isinstance(lyric, str) and lyric.strip():
+                song.lyrics = lyric
+                return song
 
         return song
 
@@ -585,7 +807,7 @@ class QQMusic(BaseMusicPlayer):
         Returns:
             The song with popular comments when QQ Music provides them.
         """
-        if song.comments or not song.id:
+        if song.comments:
             return song
 
         params = urllib.parse.urlencode(
@@ -610,15 +832,10 @@ class QQMusic(BaseMusicPlayer):
             }
         )
         request = urllib.request.Request(
-            f"{self.COMMENTS_API_URL}?{params}", headers=self.DOWNLOAD_HEADERS
+            f"{self.COMMENTS_API_URL}?{params}", headers=self.HEADERS
         )
         try:
-            proxy = self.platform_cfg.proxy or None
-            proxy_handler = {"http": proxy, "https": proxy} if proxy else {}
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler(proxy_handler)
-            )
-            response = await asyncio.to_thread(opener.open, request, timeout=15)
+            response = await asyncio.to_thread(self._opener.open, request, timeout=15)
             try:
                 if response.status != 200:
                     logger.warning(

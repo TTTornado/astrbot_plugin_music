@@ -357,6 +357,12 @@ export class MusicPlayer {
     }
   }
 
+  seekTo(seconds) {
+    if (Number.isFinite(seconds) && Number.isFinite(this.audio.duration)) {
+      this.audio.currentTime = Math.min(Math.max(seconds, 0), this.audio.duration);
+    }
+  }
+
   setVolume(value) {
     this.audio.volume = Math.min(Math.max(value, 0), 1);
     if (value > 0) this.audio.muted = false;
