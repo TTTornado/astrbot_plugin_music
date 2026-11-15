@@ -1,3 +1,5 @@
+import asyncio
+import base64
 from typing import Any
 
 from astrbot.api import logger
@@ -20,8 +22,20 @@ class WebController:
         self.cfg = cfg
         self.music_service = music_service
         self.store = music_service.store
+        self._login_states: dict[str, dict[str, str | None]] = {}
+        self._login_locks = {
+            "qqmusic": asyncio.Lock(),
+            "kugou": asyncio.Lock(),
+        }
         routes = [
             ("/sources", self.list_sources, ["GET"], "List enabled music sources"),
+            ("/logins", self.list_logins, ["GET"], "List music login states"),
+            (
+                "/logins/<platform>",
+                self.start_login,
+                ["POST"],
+                "Start a music QR login",
+            ),
             ("/search", self.search, ["POST"], "Search music for the plugin view"),
             ("/play", self.play, ["POST"], "Resolve audio for the plugin view"),
             ("/lyrics", self.lyrics, ["POST"], "Fetch lyrics for the plugin view"),
@@ -305,6 +319,110 @@ class WebController:
             }
         )
 
+    async def list_logins(self):
+        """Return QR-login providers without exposing stored credentials.
+
+        Returns:
+            JSON response containing provider configuration and transient login
+            state, including an active QR image when available.
+        """
+        providers = []
+        configured_players = set(self.cfg.players.keys())
+        for name, display_name in (
+            ("qqmusic", "QQ Music"),
+            ("kugou", "KuGou Music"),
+        ):
+            if name not in configured_players:
+                continue
+            player_config = getattr(self.cfg.players, name)
+            cookies = player_config.cookies or ""
+            configured = (
+                bool(player_config.uin)
+                and ("qqmusic_key=" in cookies or "qm_keyst=" in cookies)
+                if name == "qqmusic"
+                else "token=" in cookies and "userid=" in cookies
+            )
+            state = self._login_states.get(name, {})
+            status = state.get("status") or "idle"
+            providers.append(
+                {
+                    "name": name,
+                    "display_name": display_name,
+                    "configured": configured,
+                    "status": status,
+                    "qr_code": state.get("qr_code")
+                    if status in {"starting", "waiting"}
+                    else None,
+                }
+            )
+        return json_response({"platforms": providers})
+
+    async def start_login(self, platform: str):
+        """Start one provider's existing QR login flow for the plugin view.
+
+        Args:
+            platform: Login provider identifier from the request path.
+
+        Returns:
+            JSON response containing the current transient login status.
+        """
+        platform = platform.strip().lower()
+        if platform not in self._login_locks:
+            return error_response("unsupported music login provider")
+        if platform not in set(self.cfg.players.keys()):
+            return error_response(
+                "music login provider is not configured", status_code=404
+            )
+
+        async with self._login_locks[platform]:
+            current = self._login_states.get(platform)
+            if current and current.get("status") in {"starting", "waiting"}:
+                return json_response({"status": current["status"]})
+
+            state: dict[str, str | None] = {
+                "status": "starting",
+                "qr_code": None,
+            }
+            self._login_states[platform] = state
+
+            async def on_qr(image: bytes) -> None:
+                if not image:
+                    state["status"] = "error"
+                    return
+                state["qr_code"] = "data:image/png;base64," + base64.b64encode(
+                    image
+                ).decode("ascii")
+                state["status"] = "waiting"
+
+            async def on_message(message: str) -> None:
+                if "成功" in message:
+                    state["status"] = "success"
+                elif "过期" in message or "超时" in message:
+                    state["status"] = "expired"
+                elif "已有" in message:
+                    state["status"] = "busy"
+                elif "失败" in message or "无法" in message:
+                    state["status"] = "error"
+                else:
+                    state["status"] = "waiting"
+                if state["status"] not in {"starting", "waiting"}:
+                    state["qr_code"] = None
+
+            try:
+                await self.music_service.start_login(platform, on_qr, on_message)
+            except ValueError as exc:
+                state["status"] = "error"
+                return error_response(str(exc))
+            except Exception as exc:
+                state["status"] = "error"
+                logger.warning(
+                    f"Plugin music view could not start {platform} login: {exc}"
+                )
+                return error_response("failed to start music login", status_code=502)
+            if state["status"] == "starting":
+                state["status"] = "error"
+            return json_response({"status": state["status"]})
+
     async def search(self):
         """Search enabled music sources using view input."""
         payload = await request.json(default={})
@@ -429,7 +547,7 @@ class WebController:
             "player": request.query.get("player"),
             "source": request.query.get("source"),
         }
-        entries = await self.store.list_history(limit=limit, offset=offset, **filters) # type: ignore
+        entries = await self.store.list_history(limit=limit, offset=offset, **filters)  # type: ignore
         return json_response(
             {
                 "items": await self._serialize_entries(entries),

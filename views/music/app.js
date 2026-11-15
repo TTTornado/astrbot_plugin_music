@@ -1,5 +1,8 @@
 import { bridge, readAll, safeUrl, songKey, songPayload, storage } from "./api.js";
+import { showAboutDialog } from "./about-dialog.js";
+import { createFullPlayer } from "./full-player.js";
 import { icon, setIcon } from "./icons.js";
+import { createLoginManager } from "./login-manager.js";
 import { MusicPlayer } from "./player.js";
 
 let locale = "zh-CN";
@@ -7,7 +10,7 @@ const t = (key) => bridge.t(`views.music.${key}`, key);
 const $ = (id) => document.getElementById(id);
 const elements = Object.fromEntries(
   [
-    "library-nav", "playlist-nav", "new-playlist", "import-playlist", "source-count", "search-form",
+    "library-nav", "playlist-nav", "new-playlist", "import-playlist", "search-form",
     "query", "search-button", "source-tabs", "catalog", "collection-art", "view-eyebrow",
     "view-title", "view-meta", "collection-actions", "list-actions", "list-count",
     "list-status", "song-list", "player-cover", "player-title", "player-artist",
@@ -15,7 +18,7 @@ const elements = Object.fromEntries(
     "player-lyrics", "elapsed", "progress", "total-time", "mute", "volume",
     "show-queue", "queue-count", "close-player", "toast", "action-menu", "dialog",
     "dialog-title", "dialog-body", "dialog-footer", "dialog-close", "mobile-menu",
-    "sidebar-scrim", "sidebar", "collapse-sidebar", "audio",
+    "sidebar-scrim", "sidebar", "collapse-sidebar", "login-management", "about", "audio",
     "source-rail", "sources-left", "sources-right",
     "full-player", "full-player-close", "full-player-queue", "full-player-cover",
     "full-player-title", "full-player-artist", "full-player-lyrics", "full-player-elapsed",
@@ -37,8 +40,8 @@ const state = {
 };
 const favoriteRequests = new Set();
 const mobileLayout = window.matchMedia("(max-width: 680px)");
-let fullPlayerLyrics = { key: "", lines: [], current: -1 };
-const lyricRequests = new Set();
+let loginManager;
+let fullPlayer;
 
 function setSidebarOpen(open) {
   if (mobileLayout.matches) {
@@ -109,118 +112,6 @@ function coverContent(container, song) {
   }
 }
 
-function parseLyrics(value) {
-  if (typeof value !== "string" || !value.trim()) return [];
-  const lines = [];
-  const plainLines = [];
-  for (const raw of value.split(/\r?\n/)) {
-    const tags = [...raw.matchAll(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g)];
-    const text = raw.replace(/\[[^\]]+\]/g, "").trim();
-    if (!tags.length && text) plainLines.push(text);
-    for (const tag of tags) {
-      const fraction = Number(tag[3] || 0);
-      lines.push({
-        time: Number(tag[1]) * 60 + Number(tag[2]) + (tag[3]?.length === 3 ? fraction / 1000 : fraction / 100),
-        text: text || "♪",
-      });
-    }
-  }
-  if (!lines.length) {
-    return plainLines.map((text, index) => ({
-      time: index ? Number.POSITIVE_INFINITY : 0,
-      text,
-    }));
-  }
-  return lines.sort((left, right) => left.time - right.time);
-}
-
-function renderFullPlayerLyrics(song, current = 0) {
-  const key = song ? songKey(song) : "";
-  if (key !== fullPlayerLyrics.key) {
-    fullPlayerLyrics = { key, lines: parseLyrics(song?.lyrics), current: -1 };
-    elements.fullPlayerLyrics.replaceChildren();
-    if (!fullPlayerLyrics.lines.length) {
-      const empty = document.createElement("div");
-      empty.className = "full-player-lyrics-empty";
-      empty.textContent = song ? t("lyricsLoading") : t("noSongs");
-      elements.fullPlayerLyrics.append(empty);
-      return;
-    }
-    fullPlayerLyrics.lines.forEach((line, index) => {
-      const element = document.createElement("button");
-      element.type = "button";
-      element.className = "lyric-line";
-      element.textContent = line.text;
-      element.addEventListener("click", () => player.seek(line.time));
-      element.dataset.index = String(index);
-      elements.fullPlayerLyrics.append(element);
-    });
-  }
-  let active = -1;
-  fullPlayerLyrics.lines.forEach((line, index) => {
-    if (line.time <= current) active = index;
-  });
-  if (active === fullPlayerLyrics.current) return;
-  fullPlayerLyrics.current = active;
-  const lines = elements.fullPlayerLyrics.querySelectorAll(".lyric-line");
-  lines.forEach((line, index) => {
-    line.classList.toggle("active", index === active);
-    if (index === active) line.scrollIntoView?.({ block: "center", behavior: "smooth" });
-  });
-}
-
-function setFullPlayer(open) {
-  elements.fullPlayer.hidden = !open;
-  document.body.classList.toggle("full-player-open", open);
-  if (open) {
-    renderFullPlayerLyrics(player.current ? itemSong(player.current) : null, player.audio.currentTime || 0);
-    loadFullPlayerLyrics(player.current);
-    elements.fullPlayerClose.focus();
-  } else {
-    elements.playerCover.focus();
-  }
-}
-
-async function loadFullPlayerLyrics(item) {
-  const song = item ? itemSong(item) : null;
-  if (!song || song.lyrics || lyricRequests.has(songKey(song))) return;
-  const key = songKey(song);
-  lyricRequests.add(key);
-  try {
-    const result = await bridge.apiPost("lyrics", {
-      query: song.name || "",
-      artist: song.artists || "",
-      platform: song.player || "",
-    });
-    if (result?.lyrics && player.current && songKey(itemSong(player.current)) === key) {
-      song.lyrics = result.lyrics;
-      // The song identity stays the same after the async response; invalidate
-      // the rendered lyric cache so the newly fetched lines are mounted.
-      fullPlayerLyrics.key = "";
-      renderFullPlayerLyrics(song, player.audio.currentTime || 0);
-    }
-    if (!result?.lyrics && player.current && songKey(itemSong(player.current)) === key) {
-      const fallback = await bridge.apiPost("lyrics", {
-        query: song.name || "",
-        artist: song.artists || "",
-        platform: "",
-      });
-      if (fallback?.lyrics && player.current && songKey(itemSong(player.current)) === key) {
-        song.lyrics = fallback.lyrics;
-        fullPlayerLyrics.key = "";
-        renderFullPlayerLyrics(song, player.audio.currentTime || 0);
-      } else {
-        const empty = elements.fullPlayerLyrics.querySelector(".full-player-lyrics-empty");
-        if (empty) empty.textContent = t("lyricsMissing");
-      }
-    }
-  } catch {
-    // Lyrics are optional; keep the player usable when the source is unavailable.
-  } finally {
-    lyricRequests.delete(key);
-  }
-}
-
 function applyStaticText() {
   document.documentElement.lang = locale;
   document.querySelectorAll("[data-text]").forEach((element) => {
@@ -245,6 +136,8 @@ function applyStaticText() {
   ]) {
     setButtonIcon(elements[key], iconName, t(label));
   }
+  setButtonIcon(elements.loginManagement, "login", t("loginManagement"));
+  setButtonIcon(elements.about, "info", t("about"));
   elements.sidebarScrim.setAttribute("aria-label", t("dismiss"));
   elements.volume.setAttribute("aria-label", t("volume"));
   elements.progress.setAttribute("aria-label", t("progress"));
@@ -273,7 +166,6 @@ function renderSources() {
     });
     elements.sourceTabs.append(button);
   });
-  elements.sourceCount.textContent = `${state.sources.length} ${t("sources")}`;
   requestAnimationFrame(() => {
     elements.sourceTabs.querySelector(".active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     updateSourceScroll();
@@ -536,7 +428,10 @@ async function toggleFavorite(item) {
 }
 
 function showDialog(title, body, actions = []) {
+  loginManager?.stop();
   elements.dialogBody.dataset.request = String(Number(elements.dialogBody.dataset.request || 0) + 1);
+  elements.dialog.classList.toggle("about-dialog", body.classList.contains("about-content"));
+  elements.dialog.classList.toggle("login-dialog", body.classList.contains("login-content"));
   elements.dialogTitle.textContent = title;
   elements.dialogBody.replaceChildren(body);
   elements.dialogFooter.replaceChildren();
@@ -550,6 +445,14 @@ function showDialog(title, body, actions = []) {
   });
   if (!elements.dialog.open) elements.dialog.showModal();
 }
+
+loginManager = createLoginManager({
+  dialog: elements.dialog,
+  dialogBody: elements.dialogBody,
+  t,
+  toast,
+  showDialog,
+});
 
 function promptPlaylist(title, value, action, submitLabel) {
   const input = document.createElement("input");
@@ -828,9 +731,6 @@ function updatePlayer() {
   elements.playerArtist.textContent = song?.artists || "";
   elements.playerStatus.textContent = t({ loading: "resolving", playing: "playing", paused: "paused", ended: "ended", error: "failed", idle: "ready" }[player.status] || "ready");
   coverContent(elements.playerCover, song);
-  coverContent(elements.fullPlayerCover, song);
-  elements.fullPlayerTitle.textContent = song?.name || "Music";
-  elements.fullPlayerArtist.textContent = song?.artists || "";
   setButtonIcon(elements.togglePlay, player.audio.paused ? "play" : "pause", player.audio.paused ? t("play") : t("pause"));
   setButtonIcon(elements.playMode, player.mode, t(player.mode));
   setButtonIcon(elements.mute, player.audio.muted ? "muted" : "volume", player.audio.muted ? t("unmute") : t("mute"));
@@ -842,13 +742,7 @@ function updatePlayer() {
   setButtonIcon(elements.playerFavorite, "heart", song?.is_favorite ? t("unfavorite") : t("favorite"));
   elements.playerLyrics.disabled = !item;
   elements.playerCover.disabled = !item;
-  elements.fullPlayerFavorite.classList.toggle("active", Boolean(song?.is_favorite));
-  elements.fullPlayerFavorite.disabled = !item;
-  setButtonIcon(elements.fullPlayerFavorite, "heart", song?.is_favorite ? t("unfavorite") : t("favorite"));
-  setButtonIcon(elements.fullPlayerToggle, player.audio.paused ? "play" : "pause", player.audio.paused ? t("play") : t("pause"));
-  setButtonIcon(elements.fullPlayerMode, player.mode, t(player.mode));
-  renderFullPlayerLyrics(song, player.audio.currentTime || 0);
-  if (elements.fullPlayer && !elements.fullPlayer.hidden) loadFullPlayerLyrics(item);
+  fullPlayer?.update(item);
   if (state.view.type === "queue") {
     state.items = player.queue;
     renderHeading();
@@ -863,10 +757,7 @@ function updateTime(current, duration) {
   elements.elapsed.textContent = formatTime(current);
   elements.totalTime.textContent = formatTime(duration);
   elements.progress.value = String(duration ? Math.round((current / duration) * 1000) : 0);
-  elements.fullPlayerElapsed.textContent = formatTime(current);
-  elements.fullPlayerTotal.textContent = formatTime(duration);
-  elements.fullPlayerProgress.value = String(duration ? Math.round((current / duration) * 1000) : 0);
-  renderFullPlayerLyrics(player.current ? itemSong(player.current) : null, current);
+  fullPlayer?.updateTime(current, duration);
 }
 
 const player = new MusicPlayer(elements.audio, {
@@ -878,6 +769,34 @@ const player = new MusicPlayer(elements.audio, {
   },
 });
 
+fullPlayer = createFullPlayer({
+  elements: {
+    root: elements.fullPlayer,
+    trigger: elements.playerCover,
+    close: elements.fullPlayerClose,
+    queue: elements.fullPlayerQueue,
+    cover: elements.fullPlayerCover,
+    title: elements.fullPlayerTitle,
+    artist: elements.fullPlayerArtist,
+    lyrics: elements.fullPlayerLyrics,
+    elapsed: elements.fullPlayerElapsed,
+    progress: elements.fullPlayerProgress,
+    total: elements.fullPlayerTotal,
+    mode: elements.fullPlayerMode,
+    previous: elements.fullPlayerPrevious,
+    toggle: elements.fullPlayerToggle,
+    next: elements.fullPlayerNext,
+    favorite: elements.fullPlayerFavorite,
+  },
+  player,
+  t,
+  formatTime,
+  renderCover: coverContent,
+  setButtonIcon,
+  onShowQueue: () => loadView({ type: "queue" }),
+  onToggleFavorite: toggleFavorite,
+});
+
 function bindEvents() {
   document.querySelectorAll("[data-icon]").forEach((element) => setIcon(element, element.dataset.icon));
   elements.searchForm.addEventListener("submit", (event) => {
@@ -886,7 +805,14 @@ function bindEvents() {
   });
   elements.newPlaylist.addEventListener("click", () => createPlaylist());
   elements.importPlaylist.addEventListener("click", importPlaylist);
+  elements.loginManagement.addEventListener("click", loginManager.show);
+  elements.about.addEventListener("click", () => showAboutDialog({
+    t,
+    showDialog,
+    closeDialog: () => elements.dialog.close(),
+  }));
   elements.dialogClose.addEventListener("click", () => elements.dialog.close());
+  elements.dialog.addEventListener("close", loginManager.stop);
   elements.mobileMenu.addEventListener("click", () => setSidebarOpen(true));
   elements.collapseSidebar.addEventListener("click", () => setSidebarOpen(false));
   elements.sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
@@ -914,15 +840,7 @@ function bindEvents() {
   elements.closePlayer.addEventListener("click", () => player.clear());
   elements.playerFavorite.addEventListener("click", () => player.current && toggleFavorite(player.current));
   elements.playerLyrics.addEventListener("click", () => player.current && showLyrics(player.current));
-  elements.playerCover.addEventListener("click", () => setFullPlayer(true));
-  elements.fullPlayerClose.addEventListener("click", () => setFullPlayer(false));
-  elements.fullPlayerQueue.addEventListener("click", () => { setFullPlayer(false); loadView({ type: "queue" }); });
-  elements.fullPlayerToggle.addEventListener("click", () => player.toggle());
-  elements.fullPlayerPrevious.addEventListener("click", () => player.previous());
-  elements.fullPlayerNext.addEventListener("click", () => player.next(true));
-  elements.fullPlayerMode.addEventListener("click", () => player.cycleMode());
-  elements.fullPlayerFavorite.addEventListener("click", () => player.current && toggleFavorite(player.current));
-  elements.fullPlayerProgress.addEventListener("input", () => player.seek(Number(elements.fullPlayerProgress.value) / 1000));
+  fullPlayer.bindEvents();
   document.addEventListener("click", (event) => {
     if (!elements.actionMenu.contains(event.target) && !event.target.closest("[data-action-menu-trigger]")) {
       elements.actionMenu.hidden = true;

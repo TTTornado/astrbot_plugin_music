@@ -242,7 +242,7 @@ class KuGouMusic(BaseMusicPlayer):
                     "Referer": "https://m.kugou.com/",
                 },
                 proxy=self.platform_cfg.proxy or None,
-                timeout=20,
+                timeout=20, # type: ignore
             ) as response:
                 if response.status != 200:
                     raise RuntimeError(

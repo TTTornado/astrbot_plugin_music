@@ -166,6 +166,13 @@ class MusicService:
                 detected = {"kugou", "kugou_api"}
             elif hostname == "kuwo.cn" or hostname.endswith(".kuwo.cn"):
                 detected = {"kuwo"}
+            elif hostname == "music.nekocore.cn" or any(
+                player.platform.name == "neko"
+                and hostname
+                == (urlparse(getattr(player, "base_url", "")).hostname or "").lower()
+                for player in self.players
+            ):
+                detected = {"neko"}
         if not detected:
             raise ValueError(
                 "could not detect the playlist source; specify a platform for bare IDs"

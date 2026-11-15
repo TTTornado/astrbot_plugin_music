@@ -6,7 +6,7 @@
 
 _🎵 高性能多平台点歌插件 🎵_
 
-[![License](https://img.shields.io/badge/License-GPL_v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
 [![GitHub](https://img.shields.io/badge/作者-Zhalslar-blue)](https://github.com/Zhalslar)
@@ -25,7 +25,7 @@ _🎵 高性能多平台点歌插件 🎵_
 - 🔁 多发送方式自动降级
 - 📃 文本 / 图片 / 单曲 三种选歌模式
 - 💬 支持歌词、热评、卡片、语音、文件
-- 📥 支持从网易云、QQ 音乐、酷狗和酷我导入歌单
+- 📥 支持从网易云、QQ 音乐、酷狗、酷我和 Neko 导入歌单
 - 🤖 支持 LLM Tool 自动点歌
 - 🚫 无需 VIP，不绑定单一平台
 
@@ -41,10 +41,12 @@ _🎵 高性能多平台点歌插件 🎵_
 | 酷狗音乐API版 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 依赖 KuGouMusicApi，需配置 API 地址 |
 | 汽水音乐 | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅* | VIP歌曲可试听片段，卡片用QQ音乐伪造 |
 | TXQQ 聚合音源 | ✅ | ❌ | ✅ | - | ❌ | ❌ | - | 支持多平台子音源 |
-| Neko 云音乐 | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅* | 开箱即用 |
+| Neko 云音乐 | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ✅* | 开箱即用，支持自建 API |
 | Apple Music | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅* | 仅提供30s试听音频，卡片用QQ音乐伪造 |
 
 > ✅ 支持，❌ 不支持，卡片列✅* 表示用QQ音乐卡片伪造，TXQQ 聚合音源情况取决于子音源
+
+> ¹ Neko 提供的是站内公开评论，不是按热度排序的“热评”。
 
 ---
 
@@ -93,6 +95,8 @@ _🎵 高性能多平台点歌插件 🎵_
 | `登录Q音` | 扫码登录QQ 音乐 |
 | `登录酷狗` | 扫码登录酷狗音乐 |
 
+也可以在 WebUI 左下角打开 **登录管理**，为 QQ 音乐或酷狗音乐发起扫码登录并查看登录状态。
+
 同时，插件提供 LLM Tool，支持用自然语言点歌、查歌词，当用户表达“想听某首歌”时可自动调用播放。
 
 | 示例调用                  | 说明             |
@@ -131,6 +135,7 @@ _🎵 高性能多平台点歌插件 🎵_
  
 ## 🎉 致谢
 
+- 本程序由 [Neko歌姬计划 API](https://github.com/FantasyNetworkCN/NekoMusic) 提供技术支持；[API 文档](https://github.com/FantasyNetworkCN/NekoMusicDocs)。
 - 感谢网易云音乐第三方 Node.js API 项目：[api-enhanced](https://github.com/neteasecloudmusicapienhanced/api-enhanced), 其支持丰富的音乐相关接口，适合自建服务、二次开发和多平台部署。
 - 感谢酷狗音乐第三方 Node.js API 项目：[KuGouMusic API](https://github.com/MakcRe/KuGouMusicApi)，同样支持丰富的音乐相关接口，适合自建服务、二次开发和多平台部署。
 - 感谢 [超凶的大猫咪](https://github.com/LWELY)  提供的 QQ 音乐相关代码，已融合进本项目。

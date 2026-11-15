@@ -359,12 +359,6 @@
                         "type": "text",
                         "default": ""
                     },
-                    "enable_xiaobai_fallback": {
-                        "description": "备用音源",
-                        "hint": "官方音频获取失败或校验不通过时，按同一首 QQ 歌曲的 ID 尝试小白音乐。无需向备用源提供 QQ 登录态；完整音频可用性取决于上游。",
-                        "type": "bool",
-                        "default": true
-                    },
                     "proxy": {
                         "description": "代理地址",
                         "hint": "此地址仅用于该音源的网络请求；留空表示直连。示例：http://127.0.0.1:7890。",
@@ -619,6 +613,24 @@
                         "hint": "Neko 云音乐 API 根地址。",
                         "type": "string",
                         "default": "https://music.nekocore.cn"
+                    },
+                    "quality": {
+                        "description": "文件音质",
+                        "hint": "仅文件模式使用此音质；具体可用音质取决于歌曲源文件。",
+                        "type": "string",
+                        "options": [
+                            "standard",
+                            "hq",
+                            "sq",
+                            "hires"
+                        ],
+                        "labels": [
+                            "标准音质",
+                            "高音质",
+                            "无损音质",
+                            "Hi-Res"
+                        ],
+                        "default": "hq"
                     },
                     "proxy": {
                         "description": "代理地址",

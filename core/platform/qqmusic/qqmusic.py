@@ -242,11 +242,13 @@ class QQMusic(BaseMusicPlayer):
 
         songs: list[Song] = []
         for item in self._get_response_song_list(data):
-            singers = "/".join(
-                singer.get("name")
-                for singer in item.get("singer", [])
-                if singer.get("name")
-            )
+            singer_names: list[str] = []
+            for singer in item.get("singer", []):
+                if isinstance(singer, dict):
+                    singer_name = singer.get("name")
+                    if isinstance(singer_name, str) and singer_name:
+                        singer_names.append(singer_name)
+            singers = "/".join(singer_names)
             album = item.get("album") or {}
             album_mid = album.get("mid") or ""
             cover_url = (
@@ -342,11 +344,13 @@ class QQMusic(BaseMusicPlayer):
         for item in items[:limit]:
             if not isinstance(item, dict) or not item.get("id") or not item.get("mid"):
                 continue
-            singers = "/".join(
-                singer.get("name")
-                for singer in item.get("singer", [])
-                if isinstance(singer, dict) and singer.get("name")
-            )
+            singer_names: list[str] = []
+            for singer in item.get("singer", []):
+                if isinstance(singer, dict):
+                    singer_name = singer.get("name")
+                    if isinstance(singer_name, str) and singer_name:
+                        singer_names.append(singer_name)
+            singers = "/".join(singer_names)
             album = item.get("album") or {}
             album_mid = album.get("mid") if isinstance(album, dict) else ""
             interval = item.get("interval") or 0
@@ -385,8 +389,65 @@ class QQMusic(BaseMusicPlayer):
             description=metadata.get("desc"),
         )
 
+    async def _fetch_preview_audio(
+        self, song: Song, configured_uin: str, uin: int
+    ) -> Song:
+        """Resolve a QQ Music preview URL using the song's official song MID.
+
+        Args:
+            song: Song whose preview URL should be resolved.
+            configured_uin: QQ Music UIN as configured by the user.
+            uin: Validated numeric QQ Music UIN.
+
+        Returns:
+            The song with a preview URL when QQ Music provides one.
+        """
+        body = {
+            "comm": {
+                "uin": uin,
+                "format": "json",
+                "ct": 24,
+                "cv": 0,
+            },
+            "req_0": {
+                "module": "vkey.GetVkeyServer",
+                "method": "CgiGetVkey",
+                "param": {
+                    "filename": [f"RS02{song.note}{song.note}.mp3"],
+                    "guid": "10000",
+                    "songmid": [song.note],
+                    "songtype": [0],
+                    "uin": configured_uin,
+                    "loginflag": 1,
+                    "platform": "20",
+                },
+            },
+        }
+        data = await self._post_musicu(body, "")
+        request_data = data.get("req_0") if data else None
+        response_data = (
+            request_data.get("data") if isinstance(request_data, dict) else None
+        )
+        if not isinstance(response_data, dict):
+            response_data = {}
+        servers = response_data.get("sip") or []
+        url_info = response_data.get("midurlinfo") or []
+        if (
+            servers
+            and isinstance(url_info, list)
+            and url_info
+            and isinstance(url_info[0], dict)
+            and url_info[0].get("purl")
+        ):
+            song.audio_url = servers[0] + url_info[0]["purl"]
+        else:
+            logger.warning(
+                f"QQ Music did not return a preview URL for song {song.note}"
+            )
+        return song
+
     async def fetch_extra(self, song: Song) -> Song:
-        """Resolve a QQ Music audio URL using the song's official song MID.
+        """Resolve a QQ Music full or preview URL using the official song MID.
 
         Args:
             song: Song returned by the QQ Music search API.
@@ -408,6 +469,9 @@ class QQMusic(BaseMusicPlayer):
             return song
 
         cookie = self._get_cookie()
+        if not cookie:
+            return await self._fetch_preview_audio(song, configured_uin, uin)
+
         body = {
             "comm": {
                 "uin": uin,
@@ -447,7 +511,11 @@ class QQMusic(BaseMusicPlayer):
         ):
             song.audio_url = servers[0] + url_info[0]["purl"]
         else:
-            logger.warning(f"QQ Music did not return an audio URL for song {song.note}")
+            logger.info(
+                f"QQ Music did not return a full audio URL for song {song.note}; "
+                "falling back to preview"
+            )
+            return await self._fetch_preview_audio(song, configured_uin, uin)
         return song
 
     async def fetch_lyrics(self, song: Song) -> Song:

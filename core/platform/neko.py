@@ -1,11 +1,8 @@
-import asyncio
-import hashlib
-import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import ClassVar
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import aiofiles
 import aiohttp
@@ -13,7 +10,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..config import PluginConfig
-from ..model import Platform, Song
+from ..model import Platform, Playlist, Song
 from .base import BaseMusicPlayer
 
 
@@ -24,200 +21,55 @@ class NekoMusic(BaseMusicPlayer):
         name="neko",
         display_name="Neko 云音乐",
     )
+    supported_audio_qualities: ClassVar[tuple[str, ...]] = (
+        "standard",
+        "hq",
+        "sq",
+        "hires",
+    )
+    supports_playlist_import = True
     DEFAULT_BASE_URL = "https://music.nekocore.cn"
-    CLIENT_NAME = "NekoMusic-pc+1.9.3"
-    NONCE_BATCH_SIZE = 8
-    MAX_POW_DIFFICULTY = 24
-    MAX_POW_ATTEMPTS = 1 << (MAX_POW_DIFFICULTY + 3)
+    CLIENT_NAME = "NekoMusic-AstrBot/1.0"
     HEADERS: ClassVar[dict[str, str]] = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "X-Neko-Client": CLIENT_NAME,
+        "User-Agent": CLIENT_NAME,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
     }
 
     def __init__(self, config: PluginConfig):
+        """Configure the adapter for one NekoMusic server.
+
+        Args:
+            config: Plugin configuration containing the NekoMusic base URL and proxy.
+        """
         super().__init__(config)
         self.base_url = (self.platform_cfg.base_url or self.DEFAULT_BASE_URL).rstrip(
             "/"
         )
-        self._nonce_pools = {"read": [], "write": []}
-        self._nonce_expiry: dict[str, float | None] = {"read": None, "write": None}
-        self._nonce_lock = asyncio.Lock()
-
-    def _api_headers(self) -> dict[str, str]:
-        """Build headers required by the Neko API client contract."""
-        headers = dict(self.HEADERS)
-        headers["Origin"] = self.base_url
-        headers["Referer"] = f"{self.base_url}/"
-        return headers
-
-    @staticmethod
-    def _solve_challenge(seed: str, difficulty: int, max_attempts: int) -> str:
-        """Find a SHA-256 proof for a server-issued replay challenge.
-
-        Args:
-            seed: Random challenge seed returned by the API.
-            difficulty: Required number of leading zero bits.
-            max_attempts: Upper bound on counters to test.
-
-        Returns:
-            The decimal counter that satisfies the challenge.
-
-        Raises:
-            RuntimeError: If no proof is found within the work budget.
-        """
-        target = 1 << (256 - difficulty) if difficulty else 1 << 256
-        for counter in range(max_attempts):
-            digest = hashlib.sha256(f"{seed}:{counter}".encode()).digest()
-            if int.from_bytes(digest, "big") < target:
-                return str(counter)
-        raise RuntimeError("Neko API replay challenge exceeded the work budget")
-
-    async def _fetch_nonce_batch(self, nonce_type: str) -> None:
-        """Exchange a bounded proof-of-work challenge for one-use nonces."""
-        count = self.NONCE_BATCH_SIZE
-        requested = {"read": count if nonce_type == "read" else 0}
-        requested["write"] = count if nonce_type == "write" else 0
-        session = self._get_session()
-        proxy = self.platform_cfg.proxy or None
-
-        for challenge_attempt in range(2):
-            async with session.get(
-                f"{self.base_url}/api/replay/challenge",
-                params=requested,
-                headers=self._api_headers(),
-                proxy=proxy,
-            ) as response:
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"Neko API challenge returned HTTP {response.status}"
-                    )
-                challenge_body = await response.json(content_type=None)
-
-            challenge_data = (
-                challenge_body.get("data") if isinstance(challenge_body, dict) else None
-            )
-            if not isinstance(challenge_data, dict) or not challenge_body.get(
-                "success"
-            ):
-                raise RuntimeError("Neko API returned an invalid replay challenge")
-            if challenge_data.get("algorithm") != "sha256-leading-zero-bits":
-                if challenge_attempt == 0:
-                    continue
-                raise RuntimeError(
-                    "Neko API returned an unsupported challenge algorithm"
-                )
-
-            seed = challenge_data.get("seed")
-            challenge = challenge_data.get("challenge")
-            difficulty = challenge_data.get("difficulty")
-            if (
-                not isinstance(seed, str)
-                or not isinstance(challenge, str)
-                or not isinstance(difficulty, int)
-                or isinstance(difficulty, bool)
-            ):
-                raise TypeError("Neko API returned invalid replay challenge fields")
-            if difficulty < 0 or difficulty > self.MAX_POW_DIFFICULTY:
-                raise RuntimeError(
-                    f"Neko API challenge difficulty {difficulty} exceeds client capacity"
-                )
-
-            proof = await asyncio.to_thread(
-                self._solve_challenge,
-                seed,
-                difficulty,
-                self.MAX_POW_ATTEMPTS,
-            )
-            async with session.get(
-                f"{self.base_url}/api/replay/nonce",
-                params={**requested, "challenge": challenge, "proof": proof},
-                headers=self._api_headers(),
-                proxy=proxy,
-            ) as response:
-                if response.status == 409 and challenge_attempt == 0:
-                    continue
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"Neko API nonce exchange returned HTTP {response.status}"
-                    )
-                nonce_body = await response.json(content_type=None)
-
-            nonce_data = (
-                nonce_body.get("data") if isinstance(nonce_body, dict) else None
-            )
-            nonce_lists = (
-                nonce_data.get("nonces") if isinstance(nonce_data, dict) else None
-            )
-            values = (
-                nonce_lists.get(nonce_type) if isinstance(nonce_lists, dict) else None
-            )
-            if (
-                not isinstance(values, list)
-                or len(values) < count
-                or any(
-                    not isinstance(value, str) or not value for value in values[:count]
-                )
-                or not nonce_body.get("success")
-            ):
-                raise RuntimeError("Neko API returned an invalid nonce batch")
-
-            expires_in = (
-                nonce_data.get("expiresIn") if isinstance(nonce_data, dict) else None
-            )
-            self._nonce_expiry[nonce_type] = (
-                time.monotonic() + expires_in
-                if isinstance(expires_in, (int, float)) and expires_in > 0
-                else None
-            )
-            self._nonce_pools[nonce_type] = values[:count]
-            return
-
-        raise RuntimeError("Neko API rejected the replay challenge")
-
-    async def _get_api_nonce(self, method: str) -> str:
-        """Return an unused nonce matching the HTTP method."""
-        nonce_type = "read" if method.upper() in {"GET", "HEAD"} else "write"
-        async with self._nonce_lock:
-            expiry = self._nonce_expiry[nonce_type]
-            if expiry is not None and time.monotonic() >= expiry:
-                self._nonce_pools[nonce_type].clear()
-            if not self._nonce_pools[nonce_type]:
-                await self._fetch_nonce_batch(nonce_type)
-            return self._nonce_pools[nonce_type].pop()
 
     async def _request_api(self, method: str, endpoint: str, **kwargs):
-        """Send an API request with a fresh nonce and one conflict retry."""
+        """Send one request to a public NekoMusic API endpoint.
+
+        Args:
+            method: HTTP method used for the request.
+            endpoint: Absolute API path below the configured NekoMusic origin.
+            **kwargs: Additional arguments forwarded to ``aiohttp``.
+
+        Returns:
+            Decoded JSON data, or None when the request fails.
+        """
         session = self._get_session()
         proxy = self.platform_cfg.proxy or None
-        headers = self._api_headers()
-        headers.update(kwargs.pop("headers", {}))
-
-        for attempt in range(2):
-            request_headers = dict(headers)
-            request_headers["X-Neko-Nonce"] = await self._get_api_nonce(method)
+        headers = dict(self.HEADERS)
+        headers.update(kwargs.pop("headers", {}) or {})
+        try:
             async with session.request(
                 method,
                 f"{self.base_url}{endpoint}",
-                headers=request_headers,
+                headers=headers,
                 proxy=proxy,
                 **kwargs,
             ) as response:
-                if response.status == 409 and attempt == 0:
-                    nonce_type = (
-                        "read" if method.upper() in {"GET", "HEAD"} else "write"
-                    )
-                    async with self._nonce_lock:
-                        self._nonce_pools[nonce_type].clear()
-                        self._nonce_expiry[nonce_type] = None
-                    continue
                 if response.status != 200:
                     body = (await response.text())[:200]
                     logger.warning(
@@ -230,7 +82,9 @@ class NekoMusic(BaseMusicPlayer):
                 except ValueError as exc:
                     logger.warning(f"Neko API returned invalid JSON: {exc}")
                     return None
-        return None
+        except (TimeoutError, aiohttp.ClientError, OSError) as exc:
+            logger.warning(f"Neko API {method} {endpoint} failed: {exc}")
+            return None
 
     async def fetch_songs(
         self,
@@ -288,7 +142,11 @@ class NekoMusic(BaseMusicPlayer):
             if not isinstance(album, str):
                 album = None
             duration = item.get("duration")
-            if isinstance(duration, (int, float)) and 0 < duration <= 14400:
+            if (
+                isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                and duration > 0
+            ):
                 duration = int(duration * 1000)
             songs.append(
                 Song(
@@ -301,11 +159,124 @@ class NekoMusic(BaseMusicPlayer):
                     if isinstance(duration, (int, float))
                     else None,
                     cover_url=f"{self.base_url}/api/music/cover/{song_id}",
-                    page_url=item.get("page_url") or item.get("web_url"),
+                    page_url=f"{self.base_url}/detail/{song_id}",
                     note=album,
                 )
             )
         return songs
+
+    async def fetch_playlist(self, reference: str, limit: int = 1000) -> Playlist:
+        """Fetch a public NekoMusic playlist and normalize its tracks.
+
+        Args:
+            reference: Numeric playlist ID or a playlist URL on this NekoMusic host.
+            limit: Maximum number of tracks to return.
+
+        Returns:
+            Public playlist metadata and normalized NekoMusic songs.
+
+        Raises:
+            ValueError: If the reference or limit is invalid.
+            RuntimeError: If playlist metadata or tracks cannot be loaded.
+        """
+        value = reference.strip()
+        playlist_id = value if value.isdigit() else ""
+        if not playlist_id:
+            parsed = urlparse(value)
+            configured = urlparse(self.base_url)
+            allowed_hosts = {
+                (urlparse(self.DEFAULT_BASE_URL).hostname or "").lower(),
+                (configured.hostname or "").lower(),
+            }
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.hostname.lower() not in allowed_hosts
+            ):
+                raise ValueError("invalid NekoMusic playlist URL")
+            playlist_id = parse_qs(parsed.query).get("id", [""])[0]
+            if not playlist_id:
+                parts = [part for part in parsed.path.split("/") if part]
+                try:
+                    marker = parts.index("playlist")
+                    playlist_id = parts[marker + 1]
+                except (ValueError, IndexError):
+                    playlist_id = ""
+        if not playlist_id.isdigit() or int(playlist_id) <= 0:
+            raise ValueError("NekoMusic playlist ID must be a positive integer")
+        if not 1 <= limit <= 1000:
+            raise ValueError("playlist import limit must be between 1 and 1000")
+
+        detail = await self._request_api("GET", f"/api/playlist/{playlist_id}")
+        metadata = detail.get("playlist") if isinstance(detail, Mapping) else None
+        if (
+            not isinstance(detail, Mapping)
+            or not detail.get("success")
+            or not isinstance(metadata, Mapping)
+            or not metadata.get("name")
+        ):
+            raise RuntimeError("NekoMusic could not load playlist details")
+        result = await self._request_api(
+            "GET", f"/api/user/playlist/music/{playlist_id}"
+        )
+        items = result.get("musicList") if isinstance(result, Mapping) else None
+        if (
+            not isinstance(result, Mapping)
+            or not result.get("success")
+            or not isinstance(items, list)
+        ):
+            raise RuntimeError("NekoMusic could not load playlist tracks")
+
+        songs: list[Song] = []
+        for item in items[:limit]:
+            if not isinstance(item, Mapping) or item.get("id") is None:
+                continue
+            song_id = str(item["id"])
+            duration = item.get("duration")
+            duration_ms = (
+                int(duration * 1000)
+                if isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                and duration > 0
+                else None
+            )
+            cover = item.get("coverUrl") or item.get("coverPath")
+            songs.append(
+                Song(
+                    id=song_id,
+                    source=self.platform.name,
+                    card_type="qq",
+                    name=item.get("title") or item.get("name"),
+                    artists=item.get("artist"),
+                    duration=duration_ms,
+                    cover_url=(
+                        urljoin(f"{self.base_url}/", cover)
+                        if isinstance(cover, str) and cover
+                        else f"{self.base_url}/api/music/cover/{song_id}"
+                    ),
+                    page_url=f"{self.base_url}/detail/{song_id}",
+                    note=item.get("album"),
+                )
+            )
+
+        creator = metadata.get("creator")
+        return Playlist(
+            id=playlist_id,
+            source=self.platform.name,
+            name=str(metadata["name"]),
+            songs=songs,
+            cover_url=songs[0].cover_url if songs else None,
+            creator=(
+                str(creator["nickname"])
+                if isinstance(creator, Mapping) and creator.get("nickname")
+                else None
+            ),
+            description=(
+                str(metadata["description"])
+                if metadata.get("description") is not None
+                else None
+            ),
+        )
 
     async def fetch_extra(self, song: Song) -> Song:
         """Resolve the Neko API media pointer to a downloadable URL.
@@ -343,7 +314,7 @@ class NekoMusic(BaseMusicPlayer):
         try:
             async with self._get_session().get(
                 url,
-                headers=self._api_headers(),
+                headers=self.HEADERS,
                 proxy=self.platform_cfg.proxy or None,
             ) as response:
                 if response.status != 200:
@@ -356,16 +327,35 @@ class NekoMusic(BaseMusicPlayer):
     async def download_audio(
         self, song: Song, quality: str | None = None
     ) -> Path | None:
-        """Download Neko media with required client headers.
+        """Resolve and download the requested NekoMusic audio quality.
 
         Args:
-            song: Song whose direct media URL was resolved by the Neko API.
-            quality: Requested audio quality, ignored by this platform.
+            song: NekoMusic song to download.
+            quality: One of standard, hq, sq, or hires.
 
         Returns:
             Path to the downloaded audio, or None if the request fails.
         """
-        del quality
+        requested_quality = quality or "hq"
+        if requested_quality not in self.supported_audio_qualities:
+            logger.warning(
+                f"Unsupported Neko Music quality {requested_quality}; using hq"
+            )
+            requested_quality = "hq"
+        result = await self._request_api(
+            "GET",
+            f"/api/music/file/{song.id}",
+            params={"quality": requested_quality},
+        )
+        data = result.get("data") if isinstance(result, Mapping) else None
+        media_url = data.get("url") if isinstance(data, Mapping) else None
+        if (
+            isinstance(result, Mapping)
+            and result.get("success")
+            and isinstance(media_url, str)
+            and media_url
+        ):
+            song.audio_url = urljoin(f"{self.base_url}/", media_url)
         if not song.audio_url:
             return None
         suffix = Path(urlparse(song.audio_url).path).suffix.lower()
@@ -376,7 +366,7 @@ class NekoMusic(BaseMusicPlayer):
         try:
             async with self._get_session().get(
                 song.audio_url,
-                headers=self._api_headers(),
+                headers=self.HEADERS,
                 proxy=self.platform_cfg.proxy or None,
                 timeout=120,  # type: ignore
             ) as response:
@@ -395,23 +385,52 @@ class NekoMusic(BaseMusicPlayer):
             return None
 
     async def fetch_comments(self, song: Song) -> Song:
-        """Return the song unchanged because this source has no comment API.
+        """Load the first page of public NekoMusic comments.
 
         Args:
             song: Song returned by the Neko search API.
 
         Returns:
-            The original song.
+            The song with public top-level comments when available.
         """
+        if song.comments:
+            return song
+        result = await self._request_api(
+            "GET",
+            "/api/comments",
+            params={"musicId": song.id, "page": 1, "pageSize": 50},
+        )
+        data = result.get("data") if isinstance(result, Mapping) else None
+        comments = data.get("comments") if isinstance(data, Mapping) else None
+        if (
+            isinstance(result, Mapping)
+            and result.get("success")
+            and isinstance(comments, list)
+            and comments
+        ):
+            song.comments = comments
         return song
 
     async def fetch_lyrics(self, song: Song) -> Song:
-        """Return the song unchanged because this source has no lyrics API.
+        """Load stored LRC lyrics from the NekoMusic song detail endpoint.
 
         Args:
             song: Song returned by the Neko search API.
 
         Returns:
-            The original song.
+            The song with lyrics when NekoMusic has non-placeholder LRC content.
         """
+        if song.lyrics:
+            return song
+        result = await self._request_api("GET", f"/api/music/info/{song.id}")
+        data = result.get("data") if isinstance(result, Mapping) else None
+        lyrics = data.get("lyrics") if isinstance(data, Mapping) else None
+        if (
+            isinstance(result, Mapping)
+            and result.get("success")
+            and isinstance(lyrics, str)
+            and lyrics.strip()
+            and "Neko歌姬计划 暂无歌词" not in lyrics
+        ):
+            song.lyrics = lyrics
         return song
