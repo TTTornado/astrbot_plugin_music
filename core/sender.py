@@ -711,6 +711,9 @@ class MusicSender:
             seg = Record.fromFileSystem(str(file_path.resolve()))
             await event.send(event.chain_result([seg]))
             return True
+        except asyncio.CancelledError:
+            self._unlink_temp_audio(file_path)
+            raise
         except Exception as e:
             self._unlink_temp_audio(file_path)
             logger.error(f"Local voice send failed: {e}")
@@ -748,6 +751,9 @@ class MusicSender:
             seg = File(name=file_name, file=str(file_path.resolve()))
             await event.send(event.chain_result([seg]))
             return True
+        except asyncio.CancelledError:
+            self._unlink_temp_audio(file_path)
+            raise
         except Exception as e:
             self._unlink_temp_audio(file_path)
             logger.error(f"Local file send failed: {e}")

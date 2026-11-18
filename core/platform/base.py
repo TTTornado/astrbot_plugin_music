@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 import uuid
@@ -209,15 +210,18 @@ class BaseMusicPlayer(ABC):
         cls, temp_dir: Path, max_age_seconds: float = _TEMP_FILE_MAX_AGE_SECONDS
     ) -> int:
         """Remove expired files inside the plugin's dedicated temp directory."""
-        if not temp_dir.is_dir():
-            return 0
         cutoff = time.time() - max_age_seconds
         removed = 0
-        for entry in temp_dir.iterdir():
-            if not entry.is_file():
-                continue
+        try:
+            if not temp_dir.is_dir():
+                return 0
+            entries = list(temp_dir.iterdir())
+        except OSError as exc:
+            logger.debug(f"Failed to scan temp directory {temp_dir}: {exc}")
+            return 0
+        for entry in entries:
             try:
-                if entry.stat().st_mtime < cutoff:
+                if entry.is_file() and entry.stat().st_mtime < cutoff:
                     entry.unlink(missing_ok=True)
                     removed += 1
             except OSError:
@@ -259,6 +263,9 @@ class BaseMusicPlayer(ABC):
                         await file.write(chunk)
             logger.debug(f"歌曲下载完成，保存在：{file_path}")
             return file_path
+        except asyncio.CancelledError:
+            file_path.unlink(missing_ok=True)
+            raise
         except Exception as e:
             file_path.unlink(missing_ok=True)
             logger.error(f"歌曲下载失败，错误信息：{e}")

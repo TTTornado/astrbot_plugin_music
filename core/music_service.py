@@ -408,7 +408,7 @@ class MusicService:
                     ),
                     timeout=per_source_timeout,
                 )
-            except TimeoutError:
+            except (TimeoutError, asyncio.TimeoutError):
                 logger.warning(
                     f"Search via {player.platform.display_name} timed out "
                     f"after {per_source_timeout:.0f}s"
