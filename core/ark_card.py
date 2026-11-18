@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -57,11 +58,14 @@ class ArkCard:
         """
         try:
             async with self._get_session().get(
-                cover_url, allow_redirects=True, proxy=proxy or None
+                cover_url,
+                allow_redirects=True,
+                proxy=proxy or None,
+                timeout=aiohttp.ClientTimeout(total=self._timeout),
             ) as cover_response:
                 cover_response.raise_for_status()
                 return str(cover_response.url)
-        except (aiohttp.ClientError, TimeoutError) as exc:
+        except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as exc:
             logger.warning(
                 f"Ark card cover redirect failed ({type(exc).__name__}); "
                 "using the original URL"
@@ -108,11 +112,19 @@ class ArkCard:
         }
         try:
             async with self._get_session().get(
-                self.API_URL, params=params, proxy=proxy or None
+                self.API_URL,
+                params=params,
+                proxy=proxy or None,
+                timeout=aiohttp.ClientTimeout(total=self._timeout),
             ) as response:
                 response.raise_for_status()
                 result = await response.json(content_type=None)
-        except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError) as exc:
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            asyncio.TimeoutError,
+            json.JSONDecodeError,
+        ) as exc:
             logger.warning(f"Ark card request failed: {type(exc).__name__}")
             return None
 

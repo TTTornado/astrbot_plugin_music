@@ -715,15 +715,11 @@ class MusicSender:
                         }
                     ]
                 }
-                ok = await self.send_msg(event, payloads) is not None
-                if not ok:
-                    self._unlink_temp_audio(file_path)
-                return ok
+                return await self.send_msg(event, payloads) is not None
             seg = Record.fromFileSystem(str(file_path.resolve()))
             await event.send(event.chain_result([seg]))
             return True
         except Exception as e:
-            self._unlink_temp_audio(file_path)
             logger.error(f"Local voice send failed: {e}")
             return False
 
@@ -746,7 +742,6 @@ class MusicSender:
             await event.send(event.chain_result([seg]))
             return True
         except Exception as e:
-            self._unlink_temp_audio(file_path)
             logger.error(f"Local file send failed: {e}")
             return False
 
@@ -874,18 +869,21 @@ class MusicSender:
                 logger.debug(f"{mode} 不支持，跳过")
                 continue
 
+            downloaded_temp_path: Path | None = None
             try:
                 if mode == "record_link":
                     ok = bool(song.audio_url) and await self._send_record_link(
                         event, song.audio_url
                     )
                 elif mode == "record_local":
-                    file_path = await player.download_audio(song, quality="standard")
-                    if not file_path:
+                    downloaded_temp_path = await player.download_audio(
+                        song, quality="standard"
+                    )
+                    if not downloaded_temp_path:
                         logger.error(f"【{song.name}】下载失败")
                         ok = False
                     else:
-                        ok = await self._send_record_local(event, file_path)
+                        ok = await self._send_record_local(event, downloaded_temp_path)
                 elif mode == "file_link":
                     ok = bool(song.audio_url) and await self._send_file_link(
                         event,
@@ -893,17 +891,17 @@ class MusicSender:
                         f"{song.name}_{song.artists}.mp3",
                     )
                 elif mode == "file_local":
-                    file_path = await player.download_audio(
+                    downloaded_temp_path = await player.download_audio(
                         song, quality=getattr(player.platform_cfg, "quality", None)
                     )
-                    if not file_path:
+                    if not downloaded_temp_path:
                         logger.error(f"【{song.name}】下载失败")
                         ok = False
                     else:
                         ok = await self._send_file_local(
                             event,
-                            file_path,
-                            f"{song.name}_{song.artists}{file_path.suffix}",
+                            downloaded_temp_path,
+                            f"{song.name}_{song.artists}{downloaded_temp_path.suffix}",
                         )
                 elif mode == "text":
                     ok = bool(song.audio_url) and await self._send_text(
@@ -913,10 +911,17 @@ class MusicSender:
                     sender = self._get_sender(mode)
                     if not sender:
                         continue
-                    ok = await sender(event, player, song) # type: ignore
+                    ok = await sender(event, player, song)  # type: ignore
+            except asyncio.CancelledError:
+                if downloaded_temp_path is not None:
+                    self._unlink_temp_audio(downloaded_temp_path)
+                raise
             except Exception as e:
                 logger.error(f"{mode} 发送异常: {e}")
                 ok = False
+
+            if not ok and downloaded_temp_path is not None:
+                self._unlink_temp_audio(downloaded_temp_path)
 
             if ok:
                 logger.debug(f"{mode} 发送成功")
