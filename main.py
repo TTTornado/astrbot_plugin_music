@@ -31,7 +31,6 @@ class MusicPlugin(Star):
         self.lyrics_renderer = LyricsRenderer(self.cfg)
         self.song_renderer = CardRenderer(self.cfg)
         self.music_service = MusicService(self.cfg)
-        self.music_api = MusicApi(self.music_service)
         self.web_controller = WebController(context, self.cfg, self.music_service)
         self.sender = MusicSender(
             self.cfg,
@@ -40,6 +39,7 @@ class MusicPlugin(Star):
             self.song_renderer,
             self.music_service,
         )
+        self.music_api = MusicApi(self.music_service, self.sender)
         self.trigger_routes: dict[str, tuple[BaseMusicPlayer, str | None]] = {}
 
     async def initialize(self) -> None:

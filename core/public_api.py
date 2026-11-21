@@ -4,18 +4,21 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent
 
 from .model import Song
 from .music_service import MusicService
+from .sender import MusicSender
 
 
 class MusicApi:
-    """Expose a versioned, transport-neutral API to companion plugins."""
+    """Expose a versioned API to companion plugins."""
 
-    version = 1
+    version = 2
 
-    def __init__(self, music: MusicService):
+    def __init__(self, music: MusicService, sender: MusicSender):
         self.music = music
+        self.sender = sender
 
     def sources(self) -> list[dict[str, str]]:
         """Return enabled sources in configured priority order.
@@ -201,3 +204,44 @@ class MusicApi:
         path = Path(path)
         if path.parent.resolve() == self.music.cfg.temp_dir.resolve():
             path.unlink(missing_ok=True)
+
+    async def send_audio(
+        self,
+        event: AstrMessageEvent,
+        *,
+        path: Path | None = None,
+        url: str | None = None,
+        name: str = "",
+        artist: str = "",
+    ) -> bool:
+        """Send caller-owned audio through the configured fallback chain.
+
+        Args:
+            event: Message event receiving the audio.
+            path: Existing local audio file. The caller remains responsible for it.
+            url: Optional publicly accessible audio URL.
+            name: Display name used for file messages.
+            artist: Optional artist used for file messages.
+
+        Returns:
+            Whether one compatible send mode succeeded.
+
+        Raises:
+            ValueError: If neither a valid local path nor URL is provided.
+        """
+        return await self.sender.send_audio(
+            event,
+            path=path,
+            url=url,
+            name=name,
+            artist=artist,
+        )
+
+    async def send_selection(self, event: AstrMessageEvent, text: str) -> None:
+        """Send a selection message that is recalled after successful audio send.
+
+        Args:
+            event: Message event receiving the selection.
+            text: Complete selection prompt and candidate list.
+        """
+        await self.sender.send_selection(event, text)

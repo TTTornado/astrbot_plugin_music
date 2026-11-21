@@ -5,6 +5,7 @@ import random
 import re
 import uuid
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import botpy.message
@@ -43,6 +44,20 @@ from .model import Song
 from .music_service import MusicService
 from .platform import BaseMusicPlayer
 from .song_renderer import CardRenderer
+
+UNICODE_ESCAPE_PATTERN = re.compile(r"\\u([0-9a-fA-F]{4})")
+COMMENT_NOISE_PATTERN = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\ue000-\uf8ff]")
+COMMENT_EMOJI_PATTERN = re.compile(r"\[[a-zA-Z]+\]e\d+\[/[a-zA-Z]+\]|(?:e\d{6})+")
+
+
+def clean_comment_text(content: str) -> str:
+    """还原转义序列并清理评论里的控制符与私用区字符。"""
+    content = UNICODE_ESCAPE_PATTERN.sub(lambda m: chr(int(m.group(1), 16)), content)
+    # 合并代理对，丢弃孤立代理项，避免残留半截字符
+    content = content.encode("utf-16", "surrogatepass").decode("utf-16", "ignore")
+    content = COMMENT_NOISE_PATTERN.sub("", content)
+    content = COMMENT_EMOJI_PATTERN.sub("", content)
+    return re.sub(r"\[[^\]]*]", "", content).replace("\\n", "\n").strip()
 
 
 class MusicSender:
@@ -264,39 +279,46 @@ class MusicSender:
             result = await event.bot.api.call_action("send_group_msg", **payloads)
         return result.get("message_id")
 
-    async def _send_song_selection_text(
-        self,
-        event: AstrMessageEvent,
-        songs: list[Song],
-        player: BaseMusicPlayer,
-    ) -> str | int | None:
-        lins = [f"【{player.platform.display_name}】"]
-        for index, song in enumerate(songs):
-            lins.append(f"{index + 1}. {song.name} - {song.artists or ''}")
-        msg = "\n".join(lins)
+    async def send_selection(self, event: AstrMessageEvent, text: str) -> None:
+        """Send and track a text selection message for later recall.
+
+        Args:
+            event: Message event receiving the selection.
+            text: Complete selection prompt and candidate list.
+        """
         message_id: str | int | None = None
         if isinstance(event, AiocqhttpMessageEvent):
-            payloads = {"message": [{"type": "text", "data": {"text": msg}}]}
+            payloads = {"message": [{"type": "text", "data": {"text": text}}]}
             message_id = await self.send_msg(event, payloads)
         elif isinstance(event, QQOfficialMessageEvent):
             platform = getattr(event.bot, "platform", None)
             if platform is not None:
                 await platform.send_by_session(
                     event.session,
-                    MessageChain(chain=[Plain(text=msg)]),
+                    MessageChain(chain=[Plain(text=text)]),
                 )
                 message_id = getattr(platform, "_session_last_message_id", {}).get(
                     event.session_id
                 )
             else:
-                await event.send(event.plain_result(msg))
+                await event.send(event.plain_result(text))
         else:
-            await event.send(event.plain_result(msg))
+            await event.send(event.plain_result(text))
 
         if message_id is not None:
-            key = self._make_selection_key(event)
-            self._selection_message_ids[key] = message_id
-        return message_id
+            self._selection_message_ids[self._make_selection_key(event)] = message_id
+
+    async def _send_song_selection_text(
+        self,
+        event: AstrMessageEvent,
+        songs: list[Song],
+        player: BaseMusicPlayer,
+    ) -> None:
+        lins = [f"【{player.platform.display_name}】"]
+        for index, song in enumerate(songs):
+            lins.append(f"{index + 1}. {song.name} - {song.artists or ''}")
+        msg = "\n".join(lins)
+        await self.send_selection(event, msg)
 
     async def _send_song_selection_button(
         self,
@@ -523,21 +545,17 @@ class MusicSender:
             logger.warning(f"Ark music card send failed: {type(exc).__name__}")
             return False
 
-    async def _send_record_link(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
-        if not song.audio_url:
-            return False
+    async def _send_record_link(self, event: AstrMessageEvent, audio_url: str) -> bool:
         try:
             if (
                 isinstance(event, AiocqhttpMessageEvent)
                 and self.cfg.send_config.onebot_direct_audio is not False
             ):
                 payloads = {
-                    "message": [{"type": "record", "data": {"file": song.audio_url}}]
+                    "message": [{"type": "record", "data": {"file": audio_url}}]
                 }
                 return await self.send_msg(event, payloads) is not None
-            seg = Record.fromURL(song.audio_url)
+            seg = Record.fromURL(audio_url)
             await event.send(event.chain_result([seg]))
             return True
         except Exception as e:
@@ -545,16 +563,8 @@ class MusicSender:
             return False
 
     async def _send_record_local(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
+        self, event: AstrMessageEvent, file_path: Path
     ) -> bool:
-        if not song.audio_url:
-            return False
-
-        file_path = await player.download_audio(song, quality="standard")
-        if not file_path:
-            logger.error(f"【{song.name}】下载失败")
-            return False
-
         try:
             if (
                 isinstance(event, AiocqhttpMessageEvent)
@@ -578,13 +588,10 @@ class MusicSender:
             return False
 
     async def _send_file_link(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
+        self, event: AstrMessageEvent, audio_url: str, file_name: str
     ) -> bool:
-        if not song.audio_url:
-            return False
         try:
-            file_name_url = f"{song.name}_{song.artists}.mp3"
-            seg_url = File(name=file_name_url, url=song.audio_url)
+            seg_url = File(name=file_name, url=audio_url)
             await event.send(event.chain_result([seg_url]))
             return True
         except Exception as e_url:
@@ -592,20 +599,9 @@ class MusicSender:
             return False
 
     async def _send_file_local(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
+        self, event: AstrMessageEvent, file_path: Path, file_name: str
     ) -> bool:
-        if not song.audio_url:
-            return False
-
-        file_path = await player.download_audio(
-            song, quality=getattr(player.platform_cfg, "quality", None)
-        )
-        if not file_path:
-            logger.error(f"【{song.name}】下载失败")
-            return False
-
         try:
-            file_name = f"{song.name}_{song.artists}{file_path.suffix}"
             seg = File(name=file_name, file=str(file_path.resolve()))
             await event.send(event.chain_result([seg]))
             return True
@@ -613,14 +609,10 @@ class MusicSender:
             logger.error(f"Local file send failed: {e}")
             return False
 
-    async def _send_text(
-        self, event: AstrMessageEvent, player: BaseMusicPlayer, song: Song
-    ) -> bool:
+    async def _send_text(self, event: AstrMessageEvent, audio_url: str) -> bool:
         """发文本"""
-        if not song.audio_url:
-            return False
         try:
-            await event.send(event.plain_result(song.audio_url))
+            await event.send(event.plain_result(audio_url))
             return True
         except Exception as e:
             logger.error(f"文本模式发送歌曲失败: {e}")
@@ -643,13 +635,11 @@ class MusicSender:
         if not song.comments:
             return False
         try:
-            content = (
-                re.sub(
-                    r"\[[^\]]*]", "", random.choice(song.comments).get("content", "")
-                )
-                .replace("\\n", "\n")
-                .strip()
+            content = clean_comment_text(
+                random.choice(song.comments).get("content", "")
             )
+            if not content:
+                return False
             await event.send(event.plain_result(content))
             return True
         except Exception:
@@ -678,11 +668,6 @@ class MusicSender:
         return {
             "native_card": self._send_card,
             "ark_card": self._send_ark_card,
-            "record_link": self._send_record_link,
-            "record_local": self._send_record_local,
-            "file_link": self._send_file_link,
-            "file_local": self._send_file_local,
-            "text": self._send_text,
         }.get(mode)
 
     def _is_mode_supported(self, mode: str, event: AstrMessageEvent) -> bool:
@@ -746,12 +731,46 @@ class MusicSender:
                 logger.debug(f"{mode} 不支持，跳过")
                 continue
 
-            sender = self._get_sender(mode)
-            if not sender:
-                continue
-
             try:
-                ok = await sender(event, player, song)
+                if mode == "record_link":
+                    ok = bool(song.audio_url) and await self._send_record_link(
+                        event, song.audio_url
+                    )
+                elif mode == "record_local":
+                    file_path = await player.download_audio(song, quality="standard")
+                    if not file_path:
+                        logger.error(f"【{song.name}】下载失败")
+                        ok = False
+                    else:
+                        ok = await self._send_record_local(event, file_path)
+                elif mode == "file_link":
+                    ok = bool(song.audio_url) and await self._send_file_link(
+                        event,
+                        song.audio_url,
+                        f"{song.name}_{song.artists}.mp3",
+                    )
+                elif mode == "file_local":
+                    file_path = await player.download_audio(
+                        song, quality=getattr(player.platform_cfg, "quality", None)
+                    )
+                    if not file_path:
+                        logger.error(f"【{song.name}】下载失败")
+                        ok = False
+                    else:
+                        ok = await self._send_file_local(
+                            event,
+                            file_path,
+                            f"{song.name}_{song.artists}{file_path.suffix}",
+                        )
+                elif mode == "text":
+                    ok = bool(song.audio_url) and await self._send_text(
+                        event, song.audio_url
+                    )
+                else:
+                    sender = self._get_sender(mode)
+                    if not sender:
+                        continue
+                    ok = await sender(event, player, song) # type: ignore
             except Exception as e:
                 logger.error(f"{mode} 发送异常: {e}")
                 ok = False
@@ -784,3 +803,69 @@ class MusicSender:
             await self.send_lyrics(event, player, song)
 
         return True, comment_sent
+
+    async def send_audio(
+        self,
+        event: AstrMessageEvent,
+        *,
+        path: Path | None = None,
+        url: str | None = None,
+        name: str = "",
+        artist: str = "",
+    ) -> bool:
+        """Send an existing audio resource through the configured fallback chain.
+
+        Args:
+            event: Message event receiving the audio.
+            path: Existing local audio file. The caller retains ownership.
+            url: Publicly accessible audio URL.
+            name: Display name used for file messages.
+            artist: Optional artist used for file messages.
+
+        Returns:
+            Whether one compatible send mode succeeded.
+
+        Raises:
+            ValueError: If neither a valid local path nor URL is provided.
+        """
+        file_path = Path(path).resolve() if path is not None else None
+        audio_url = (url or "").strip()
+        if file_path is not None and not file_path.is_file():
+            raise ValueError(f"Audio file does not exist: {file_path}")
+        if file_path is None and not audio_url:
+            raise ValueError("A local audio path or public URL is required")
+
+        base_name = "_".join(part for part in (name.strip(), artist.strip()) if part)
+        if not base_name:
+            base_name = file_path.stem if file_path is not None else "audio"
+        suffix = file_path.suffix if file_path is not None else ".mp3"
+        file_name = f"{base_name}{suffix}"
+
+        for mode in self.cfg.real_send_modes:
+            if not self._is_mode_supported(mode, event):
+                logger.debug(f"{mode} is unsupported on this platform; skipping")
+                continue
+            try:
+                if mode == "record_local" and file_path is not None:
+                    sent = await self._send_record_local(event, file_path)
+                elif mode == "record_link" and audio_url:
+                    sent = await self._send_record_link(event, audio_url)
+                elif mode == "file_local" and file_path is not None:
+                    sent = await self._send_file_local(event, file_path, file_name)
+                elif mode == "file_link" and audio_url:
+                    sent = await self._send_file_link(event, audio_url, file_name)
+                elif mode == "text" and audio_url:
+                    sent = await self._send_text(event, audio_url)
+                else:
+                    continue
+            except Exception as exc:
+                logger.error(f"{mode} audio send failed: {exc}")
+                sent = False
+            if sent:
+                logger.debug(f"{mode} audio send succeeded")
+                if self.cfg.search_config.recall_select:
+                    await self._recall_selection_message(event)
+                return True
+
+        await event.send(event.plain_result("音频发送失败"))
+        return False
