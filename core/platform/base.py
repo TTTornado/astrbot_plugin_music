@@ -242,7 +242,7 @@ class BaseMusicPlayer(ABC):
         now = time.monotonic()
         if now - BaseMusicPlayer._last_temp_sweep_at >= self._TEMP_SWEEP_INTERVAL_SECONDS:
             BaseMusicPlayer._last_temp_sweep_at = now
-            self.cleanup_stale_temp_files(self.cfg.temp_dir)
+            await asyncio.to_thread(self.cleanup_stale_temp_files, self.cfg.temp_dir)
 
         suffix = Path(urlparse(url).path).suffix.lower()
         if suffix not in suffixes:
