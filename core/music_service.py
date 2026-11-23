@@ -46,11 +46,14 @@ class MusicService:
         self.store = MusicStore(config.db_path)
         self.players: list[BaseMusicPlayer] = []
         self._http_session: aiohttp.ClientSession | None = None
+        self._closing = False
         self._qqmusic_login = None
         self._kugou_login = None
 
     def get_http_session(self) -> aiohttp.ClientSession:
         """Lazily create the single shared HTTP session for adapters and ArkCard."""
+        if self._closing:
+            raise RuntimeError("MusicService is closing; cannot create HTTP session")
         if self._http_session is None or self._http_session.closed:
             self._http_session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.DummyCookieJar(),
@@ -80,6 +83,7 @@ class MusicService:
         Raises:
             Exception: If a source cannot be initialized.
         """
+        self._closing = False
         await self.store.initialize()
         await asyncio.to_thread(
             BaseMusicPlayer.cleanup_stale_temp_files, self.cfg.temp_dir
@@ -99,6 +103,7 @@ class MusicService:
 
     async def close(self) -> None:
         """Cancel login sessions and close sources, continuing after failures."""
+        self._closing = True
         for name, login in (
             ("qqmusic", self._qqmusic_login),
             ("kugou", self._kugou_login),
@@ -115,9 +120,11 @@ class MusicService:
             except Exception:
                 logger.exception(f"Failed to close music source {player.platform.name}")
         self.players.clear()
-        if self._http_session is not None and not self._http_session.closed:
-            await self._http_session.close()
-        self._http_session = None
+        while self._http_session is not None:
+            session = self._http_session
+            self._http_session = None
+            if not session.closed:
+                await session.close()
 
     async def start_login(
         self,
